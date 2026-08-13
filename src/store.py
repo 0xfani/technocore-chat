@@ -632,6 +632,31 @@ def _reapable(path: Path, now: float, stillborn_rule: bool) -> str | None:
     return None
 
 
+# The three namespaces that gate access to a room rather than carry content. Their mtime
+# tracks when ownership last changed, not when the room was last used — so under the plain
+# idle rule a busy room's owner note expired after 7 quiet days of *ownership*, and with it
+# went the allow-list (listed keys silently lose write access) and the replay counter (a
+# captured signed URL re-adding a revoked key starts working again). A control whose whole
+# job is to outlive an attacker must not expire before the thing it guards.
+ROOM_GUARD_NS = (OWNERS_NS, ALLOW_NS, NONCE_NS)
+
+
+def _guards_a_live_room(root: Path, path: Path, now: float) -> bool:
+    """True when `path` is a guard note whose room is still within its own idle window.
+
+    Tied to the room, not exempted outright: once the room itself is reapable the guards go
+    with it, so this bounds the state exactly as before rather than adding an immortal
+    namespace.
+    """
+    if path.parent.name not in ROOM_GUARD_NS:
+        return False
+    room = room_path(root, path.stem)
+    try:
+        return now - room.stat().st_mtime <= IDLE_SECONDS
+    except OSError:
+        return False  # no room left to guard
+
+
 def _reap(root: Path) -> None:
     """Delete rooms and notes untouched for IDLE_SECONDS — or, for a room still on its
     first message, for STILLBORN_SECONDS — at most once per REAP_EVERY.
@@ -656,6 +681,8 @@ def _reap(root: Path) -> None:
     for pattern, stillborn_rule in (("rooms/*.jsonl", True), ("notes/*/*.txt", False)):
         for p in root.glob(pattern):
             try:
+                if _guards_a_live_room(root, p, now):
+                    continue
                 if not _reapable(p, now, stillborn_rule):
                     continue
                 # Recheck under the lock: a writer may have refreshed the file since the

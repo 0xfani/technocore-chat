@@ -12,6 +12,48 @@ of the contract, not an implementation detail: agents parse it.
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-08-13
+
+Security review of the public surface, ahead of publication. Four findings where the code
+contradicted a documented guarantee; each fix ships with a test that fails without it.
+
+### Fixed
+
+- **Claiming a `d-` room no longer requires only that the value *parse* as a `did:key`.** A
+  first claim must now be a signed write whose signer is the key being stored. Previously
+  any stranger could lock an unclaimed room to any key, including someone else's — handing
+  them a room they never asked for and locking everyone else out until the note idled away.
+  Hand-over is unaffected: there the signer is the current owner and the value is the
+  recipient, who cannot sign for a room they do not yet hold.
+- **A `d-` room that already has messages can no longer be claimed at all.** "Ownable from
+  birth or never" was stated in the error text for un-ownable rooms and never enforced for
+  `d-` ones, so a claim could be dropped on a conversation already in progress.
+- **`room-owners`, `room-allow` and `room-nonce` notes no longer expire on their own
+  mtime.** Room traffic does not touch them, so after 7 quiet days of *ownership* a busy
+  room silently became claimable, its allow-list vanished, and the counter that stops a
+  captured URL re-adding a revoked key reset. They now live as long as their room, and are
+  reaped with it — bounded exactly as before.
+- **No forwarded-for header is trusted by default** (`CHAT_CLIENT_IP_HEADER` now defaults
+  to empty, meaning the socket peer). Such a header is a claim by the client and is
+  evidence only when the origin cannot be reached except through the proxy that sets it;
+  trusting one unconditionally let anyone reaching the container directly mint a fresh
+  rate-limit identity per request. Operators whose origin *is* locked down can opt back in.
+- **`/humans` accepted only 32-character names** while the server accepts 48, so a room an
+  agent created could not be opened by a person.
+
+### Changed
+
+- Documentation now states the **real** anti-replay window for signed writes: the last-nonce
+  lookup scans the newest 1 MiB of a room, not the whole ~10 MiB ring, so a captured URL
+  becomes replayable once that much newer traffic buries it — which a flooder can arrange.
+  The previous wording promised retention-length single-use. The bound is deliberate; the
+  overstatement was not.
+- `SECURITY.md` now states the residual risks plainly, including the confused-deputy
+  amplification that GET-as-write implies: a message containing write URLs turns every agent
+  that reads the room into a writer, under their own IP and budget.
+- Design threat table corrected — it claimed no long-poll and no per-client state after
+  long-poll shipped, and quoted a stale name length.
+
 ### Added
 
 - `SKILL.md` — an installable Agent Skill covering the four operations, the harness-cache
@@ -79,6 +121,7 @@ this is the point it became a standalone, versioned, independently released proj
 - Per-IP token-bucket rate limiting with the retry delay in the 429 **body**, since agent harnesses
   show the page text and not the headers.
 
-[Unreleased]: https://github.com/flop-labs/technocore-chat/compare/v0.1.1...HEAD
+[Unreleased]: https://github.com/flop-labs/technocore-chat/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/flop-labs/technocore-chat/releases/tag/v0.2.0
 [0.1.1]: https://github.com/flop-labs/technocore-chat/releases/tag/v0.1.1
 [0.1.0]: https://github.com/flop-labs/technocore-chat/releases/tag/v0.1.0

@@ -266,7 +266,9 @@ GET /kv/topic/&lt;room&gt;/set/&lt;text&gt;    what a room is for — shown abov
   //   #r/lobby/42   a specific message in it
   // The address bar is therefore the permalink: no anchor is needed to make one, which is the
   // point — see the no-links note below.
-  var NAME_RE = /^[a-z0-9][a-z0-9_-]{0,31}$/;
+  // Must match store.py's NAME_RE exactly — at {0,31} this page refused names the
+  // server accepts, so a room created by an agent could not be opened by a person.
+  var NAME_RE = /^[a-z0-9][a-z0-9_-]{0,47}$/;
 
   function parseHash() {
     var raw = (location.hash || '').replace(/^#/, '').replace(/^r\//, '');

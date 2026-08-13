@@ -250,11 +250,35 @@ def test_rate_limit_buckets_are_bounded(client, monkeypatch):
     import app as app_module
 
     monkeypatch.setattr(app_module, "MAX_BUCKETS", 8)
+    # Opted in explicitly: no forwarded header is trusted by default, so without this the
+    # whole loop is one client (the test socket) and nothing rotates.
+    monkeypatch.setattr(app_module, "CLIENT_IP_HEADER", "cf-connecting-ip")
     for i in range(50):
         client.get("/r/lobby", headers={"cf-connecting-ip": f"2001:db8::{i:x}"})
     assert len(app_module._buckets) <= 8
     # the survivors are the most recent callers, so an active client keeps its budget
     assert ("2001:db8::31", "read") in app_module._buckets
+
+
+def test_no_forwarded_header_is_trusted_by_default(client, monkeypatch):
+    """A forwarded-for header is a claim by the client. Trusting one unconditionally let
+    anyone who could reach the origin directly mint a fresh rate-limit identity per request
+    — which is every self-hoster who runs the image without locking it to a proxy."""
+    import app as app_module
+
+    assert app_module.CLIENT_IP_HEADER == ""
+    spoofed = {"cf-connecting-ip": "203.0.113.9", "x-forwarded-for": "198.51.100.7"}
+    before = set(app_module._buckets)
+    client.get("/r/lobby", headers=spoofed)
+    client.get("/r/lobby", headers={"cf-connecting-ip": "203.0.113.10"})
+    # both requests land in the socket peer's bucket, not two attacker-chosen ones
+    assert not {k for k in app_module._buckets if k[0].startswith(("203.0.113", "198.51.100"))}
+    assert set(app_module._buckets) - before  # the peer's own bucket did get created
+
+    # an operator whose origin really is locked to a proxy can still opt in
+    monkeypatch.setattr(app_module, "CLIENT_IP_HEADER", "cf-connecting-ip")
+    client.get("/r/lobby", headers=spoofed)
+    assert ("203.0.113.9", "read") in app_module._buckets
 
 
 def test_idle_rooms_are_reaped_so_squatting_expires(tmp_path, monkeypatch):
@@ -1214,8 +1238,10 @@ def test_room_classes_compose_by_prefix(client):
 # ---------------------------------------------------------------------- owned rooms
 
 
-def _claim(client, room, did):
-    return client.get(f"/kv/room-owners/{room}/set/{did}?if_absent=1")
+def _claim(client, room, did, sign, nonce=1):
+    """A claim is a signed write storing the signer's own key. The nonce counter is per
+    room and shared with room-allow, so claiming burns 1 and allow-list writes start at 2."""
+    return _set_signed(client, "room-owners", room, did, sign, did, nonce)
 
 
 def _set_signed(client, ns, key, did, sign, value, nonce=1):
@@ -1225,14 +1251,73 @@ def _set_signed(client, ns, key, did, sign, value, nonce=1):
 
 
 def test_only_d_rooms_are_ownable_and_the_front_door_never_is(client):
-    did, _ = _keypair()
-    assert _claim(client, "d-bounty", did).status_code == 200
+    did, sign = _keypair()
+    assert _claim(client, "d-bounty", did, sign).status_code == 200
     for room in ("lobby", "meta", "open-room", "mb-inbox", "events"):
-        r = _claim(client, room, did)
+        r = _claim(client, room, did, sign)
         assert r.status_code == 403, room
         assert "Only d- rooms are ownable" in r.text
     # an established open room stays open: nobody can lock its writers out
     assert client.get("/r/lobby/say/bot/still%20open").status_code == 200
+
+
+def test_a_claim_must_be_signed_by_the_key_it_stores(client):
+    """The old check only asked whether `value` *parsed* as a did:key, so anyone could lock
+    an unclaimed d- room to any key — including a stranger's, handing them a room they never
+    asked for and locking everyone else out until the note idled away."""
+    victim, _ = _keypair()
+    attacker, attacker_sign = _keypair(seed=2)
+
+    unsigned = client.get(f"/kv/room-owners/d-bounty/set/{victim}?if_absent=1")
+    assert unsigned.status_code == 403 and "only its holder can sign with it" in unsigned.text
+
+    # signing with a key you do hold, to store one you do not, is the same attack
+    forged = _set_signed(client, "room-owners", "d-bounty", attacker, attacker_sign, victim)
+    assert forged.status_code == 403
+    assert client.get("/kv/room-owners/d-bounty").status_code == 404  # nothing was stored
+
+    # and the room stays writable by everyone, because it was never actually claimed
+    assert client.get("/r/d-bounty/say/anyone/still%20open").status_code == 200
+
+
+def test_a_room_with_messages_can_no_longer_be_claimed(client):
+    """Ownable-from-birth was documented in the un-ownable rooms' error text and never
+    enforced for d- rooms, so a claim could be dropped on a conversation already running."""
+    did, sign = _keypair()
+    assert client.get("/r/d-busy/say/alice/hello").status_code == 200
+    r = _claim(client, "d-busy", did, sign)
+    assert r.status_code == 403 and "already has messages" in r.text
+    assert client.get("/r/d-busy/say/bob/still%20here").status_code == 200
+
+
+def test_ownership_guards_do_not_expire_out_from_under_a_live_room(tmp_path):
+    """room-owners, room-allow and room-nonce were reaped on their own mtime, so 7 quiet
+    days of *ownership* opened a still-busy room to a fresh claim, silently dropped the
+    allow-list, and reset the counter that stops a captured URL re-adding a revoked key."""
+    import store
+
+    did = "did:key:z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK"
+    store.append(tmp_path, "d-live", "bot", "hi")
+    for ns, value in ((store.OWNERS_NS, did), (store.ALLOW_NS, did), (store.NONCE_NS, "7")):
+        store.note_set(tmp_path, ns, "d-live", value)
+        old = time.time() - store.IDLE_SECONDS - 60
+        os.utime(store.note_path(tmp_path, ns, "d-live"), (old, old))
+
+    (tmp_path / ".reaped").unlink(missing_ok=True)
+    store.append(tmp_path, "d-live", "bot", "still talking")  # forces a reap pass
+    for ns in (store.OWNERS_NS, store.ALLOW_NS, store.NONCE_NS):
+        assert store.note_get(tmp_path, ns, "d-live") is not None, ns
+
+    # once the room itself goes, the guards go with it — bounded exactly as before
+    old = time.time() - store.IDLE_SECONDS - 60
+    os.utime(store.room_path(tmp_path, "d-live"), (old, old))
+    (tmp_path / ".reaped").unlink(missing_ok=True)
+    store.append(tmp_path, "elsewhere", "bot", "hi")
+    assert not store.room_path(tmp_path, "d-live").exists()
+    (tmp_path / ".reaped").unlink(missing_ok=True)
+    store.append(tmp_path, "elsewhere", "bot", "again")
+    for ns in (store.OWNERS_NS, store.ALLOW_NS, store.NONCE_NS):
+        assert store.note_get(tmp_path, ns, "d-live") is None, ns
 
 
 def test_a_nickname_cannot_own_a_room(client):
@@ -1246,7 +1331,7 @@ def test_an_owned_room_takes_writes_only_from_listed_keys(client):
     owner, owner_sign = _keypair()
     friend, friend_sign = _keypair(seed=2)
     stranger, stranger_sign = _keypair(seed=3)
-    assert _claim(client, "d-bounty", owner).status_code == 200
+    assert _claim(client, "d-bounty", owner, owner_sign).status_code == 200
 
     assert client.get("/r/d-bounty/say/anyone/hi").status_code == 403  # unsigned: refused
     assert _say_signed(client, "d-bounty", owner, owner_sign, "open for claims").status_code == 200
@@ -1254,11 +1339,16 @@ def test_an_owned_room_takes_writes_only_from_listed_keys(client):
 
     # the allow-list is owner-only, and it is a signed note write
     assert (
-        _set_signed(client, "room-allow", "d-bounty", friend, friend_sign, friend).status_code
+        _set_signed(
+            client, "room-allow", "d-bounty", friend, friend_sign, friend, nonce=2
+        ).status_code
         == 403
     )
     assert (
-        _set_signed(client, "room-allow", "d-bounty", owner, owner_sign, friend).status_code == 200
+        _set_signed(
+            client, "room-allow", "d-bounty", owner, owner_sign, friend, nonce=2
+        ).status_code
+        == 200
     )
     assert _say_signed(client, "d-bounty", friend, friend_sign, "my claim").status_code == 200
     assert _say_signed(client, "d-bounty", stranger, stranger_sign, "still no").status_code == 403
@@ -1271,17 +1361,23 @@ def test_an_owned_room_takes_writes_only_from_listed_keys(client):
 def test_ownership_cannot_be_taken_by_overwriting_the_note(client):
     owner, owner_sign = _keypair()
     thief, thief_sign = _keypair(seed=2)
-    _claim(client, "d-bounty", owner)
+    _claim(client, "d-bounty", owner, owner_sign)
     # unconditional overwrite, CAS claim and a signed claim by a stranger: all refused
     assert client.get(f"/kv/room-owners/d-bounty/set/{thief}").status_code == 403
-    assert _claim(client, "d-bounty", thief).status_code == 403
+    assert _claim(client, "d-bounty", thief, thief_sign).status_code == 403
     assert (
-        _set_signed(client, "room-owners", "d-bounty", thief, thief_sign, thief).status_code == 403
+        _set_signed(
+            client, "room-owners", "d-bounty", thief, thief_sign, thief, nonce=2
+        ).status_code
+        == 403
     )
     assert client.get("/kv/room-owners/d-bounty").text.strip().endswith(owner)
     # the owner may hand it over, with its own signature
     assert (
-        _set_signed(client, "room-owners", "d-bounty", owner, owner_sign, thief).status_code == 200
+        _set_signed(
+            client, "room-owners", "d-bounty", owner, owner_sign, thief, nonce=2
+        ).status_code
+        == 200
     )
     assert _say_signed(client, "d-bounty", thief, thief_sign, "mine now").status_code == 200
 
@@ -1290,7 +1386,7 @@ def test_an_allow_list_needs_an_owner_and_fails_closed_on_junk(client):
     owner, owner_sign = _keypair()
     r = _set_signed(client, "room-allow", "d-orphan", owner, owner_sign, owner)
     assert r.status_code == 403 and "has no owner" in r.text
-    _claim(client, "d-orphan", owner)
+    _claim(client, "d-orphan", owner, owner_sign)
     bad = _set_signed(client, "room-allow", "d-orphan", owner, owner_sign, "alice", nonce=2)
     assert bad.status_code == 400 and "did:keys" in bad.text
     assert client.get("/kv/room-allow/d-orphan").status_code == 404
@@ -1310,15 +1406,15 @@ def test_signed_note_writes_are_scoped_to_the_two_ownership_namespaces(client):
 def test_a_replayed_ownership_url_cannot_roll_an_allow_list_back(client):
     owner, owner_sign = _keypair()
     friend, _ = _keypair(seed=2)
-    _claim(client, "d-bounty", owner)
-    url = f"/kv/room-allow/d-bounty/set-signed/{owner}/{owner_sign(f'room-allow|d-bounty|1|{friend}')}/1/{friend}"
+    _claim(client, "d-bounty", owner, owner_sign)  # burns nonce 1
+    url = f"/kv/room-allow/d-bounty/set-signed/{owner}/{owner_sign(f'room-allow|d-bounty|2|{friend}')}/2/{friend}"
     assert client.get(url).status_code == 200
-    _set_signed(client, "room-allow", "d-bounty", owner, owner_sign, owner, nonce=2)  # revoke
+    _set_signed(client, "room-allow", "d-bounty", owner, owner_sign, owner, nonce=3)  # revoke
     r = client.get(url)  # the captured URL that would re-add the revoked key
     assert r.status_code == 403 and "single-use" in r.text
     assert friend not in client.get("/kv/room-allow/d-bounty").text
     # the counter is server-written and world-readable, never client-writable
-    assert client.get("/kv/room-nonce/d-bounty").text.strip().endswith("2")
+    assert client.get("/kv/room-nonce/d-bounty").text.strip().endswith("3")
     assert client.get("/kv/room-nonce/d-bounty/set/0").status_code == 403
 
 

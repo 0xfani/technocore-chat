@@ -68,7 +68,12 @@ CORS_ORIGINS = [o for o in os.environ.get("CHAT_CORS_ORIGINS", "").split(",") if
 # proxy rule cannot silently publish the numbers.
 STATS_TOKEN = os.environ.get("CHAT_STATS_TOKEN", "")
 STATS_CACHE_SECONDS = int(os.environ.get("CHAT_STATS_CACHE_SECONDS", "60"))
-CLIENT_IP_HEADER = os.environ.get("CHAT_CLIENT_IP_HEADER", "cf-connecting-ip").lower()
+# Empty by default, and that default is a security property rather than a convenience.
+# A client-supplied header is only trustworthy when the origin cannot be reached except
+# through the proxy that sets it; if anyone can hit the container directly they mint a
+# fresh rate-limit identity per request just by varying the header. Opting in is therefore
+# also an assertion that the origin is locked to that proxy.
+CLIENT_IP_HEADER = os.environ.get("CHAT_CLIENT_IP_HEADER", "").strip().lower()
 
 # Agents are the intended audience, so say so where crawlers look. Cloudflare serves a
 # Content Signals Policy (or a managed AI-blocking robots.txt) for zones that ship none.
@@ -125,21 +130,28 @@ _started = time.time()
 
 
 def client_ip(request: Request) -> str:
-    """Trust one edge-set header, not X-Forwarded-For: Cloudflare *appends* to XFF, so a
-    client sending its own XFF owns the first entry and would mint a fresh identity per
-    forged value. CF-Connecting-IP is written by the edge and cannot be spoofed. XFF stays
-    as the local/dev fallback — spoofable, which is one more reason the authoritative limit
-    belongs in the proxy (see README).
+    """The socket peer, unless the operator has named a header to trust instead.
+
+    No header is trusted by default. A forwarded-for header is a *claim by the client*; it
+    becomes evidence only when the origin is unreachable except through the proxy that
+    overwrites it. Trusting one unconditionally meant anyone who could reach the container
+    directly got a fresh rate-limit identity per request for the cost of one header — the
+    limiter, the write budget and the long-poll cap all key on this.
+
+    X-Forwarded-For is never consulted implicitly, for the same reason plus one more:
+    proxies *append* to it, so a client sending its own owns the first entry. An operator
+    who really is behind such a proxy can still set CHAT_CLIENT_IP_HEADER=x-forwarded-for,
+    but that is now a deliberate statement about their topology rather than a default.
 
     Shared by the rate limiter and the long-poll waiter cap: two per-IP bounds keyed on
     different notions of "IP" would each be bypassable by whichever header the other
     ignored.
     """
-    return (
-        request.headers.get(CLIENT_IP_HEADER, "").strip()
-        or request.headers.get("x-forwarded-for", "").split(",")[0].strip()
-        or (request.client.host if request.client else "?")
-    )
+    if CLIENT_IP_HEADER:
+        forwarded = request.headers.get(CLIENT_IP_HEADER, "").split(",")[0].strip()
+        if forwarded:
+            return forwarded
+    return request.client.host if request.client else "?"
 
 
 def take(request: Request, kind: str, per_min: int) -> tuple[int, float]:
@@ -734,6 +746,30 @@ def _note_write_gate(ns: str, key: str, value: str, signer: str | None) -> Respo
             return text(
                 f"403 /r/{key} is already owned. Only the current owner can hand it over, "
                 f"with a signed write: /kv/{store.OWNERS_NS}/{key}/set-signed/...",
+                403,
+            )
+        # A *first* claim must be signed by the key it stores. Checking that `value` parses
+        # as a did:key only proves it is well-formed, so an unsigned claim let a stranger
+        # lock a room to any key at all — including someone else's, handing them a room
+        # they never asked for and locking everyone else out until the note idled away.
+        #
+        # Hand-over is the other case and is deliberately not held to this: there the
+        # signer is the current owner and `value` is the recipient, who cannot sign for a
+        # room they do not yet hold. The check above already proved the signer is the owner.
+        if current is None and signer != value:
+            return text(
+                f"403 claiming /r/{key} takes a signed write proving you hold that key: "
+                f"/kv/{store.OWNERS_NS}/{key}/set-signed/<did:key>/<sig>/<nonce>/<the same did:key>. "
+                "Anyone can type a did:key; only its holder can sign with it.",
+                403,
+            )
+        # "Claiming a room people are already talking in would lock them out" was documented
+        # for the un-ownable rooms and never enforced for d- ones. Ownership is from birth.
+        if current is None and store.last_seq(ROOT, key) > 0:
+            return text(
+                f"403 /r/{key} already has messages, so it can no longer be claimed — "
+                "a room is ownable from birth or not at all, or claiming becomes a way to "
+                "take over a conversation already in progress.",
                 403,
             )
         return None
