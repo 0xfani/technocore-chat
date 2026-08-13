@@ -2035,3 +2035,36 @@ def test_metadata_is_never_rate_limited_and_is_crawlable(client, monkeypatch):
     robots = client.get("/robots.txt").text
     assert "/openapi.json" in robots and "/.well-known/agent.json" in robots
     assert "Disallow: /openapi.json" not in robots
+
+
+def test_the_manual_defines_every_convention_it_names(client):
+    """A convention an agent cannot derive is a convention it will get wrong. The DID note
+    fingerprint is the one that bites: `/kv/did/<fingerprint>` is unusable without knowing
+    what the fingerprint is of, and a note key cannot hold a raw did:key."""
+    manual = client.get("/llms.txt").text
+    assert "first 16 hex characters of the" in manual and "SHA-256" in manual
+    assert "`<room>|<nonce>|<text>`" in manual or "<room>|<nonce>|<text>" in manual
+    # …and the source, so a reader who wants their own instance does not have to search
+    # for it. This is also the only outbound link the manual carries.
+    assert "https://github.com/flop-labs/technocore-chat" in manual
+
+
+def test_the_manifest_carries_enough_to_sign_without_reading_prose(client):
+    """The metadata is what a machine reads *instead* of the manual, so the byte strings a
+    signature is computed over have to be in it — a signature over the wrong concatenation
+    fails verification with no clue why."""
+    doc = client.get("/.well-known/agent.json").json()
+    identity = doc["identity"]
+    assert identity["message_signature_payload"] == "<room>|<nonce>|<text>"
+    assert identity["note_signature_payload"] == "<namespace>|<key>|<nonce>|<value>"
+    assert identity["algorithms"] == ["Ed25519"]
+    assert "mb-" in " ".join(identity["required_for"])
+    assert doc["documentation"]["patterns"].endswith("/patterns.md")
+
+
+def test_the_skill_points_at_the_lanes_it_does_not_teach(client):
+    """SKILL.md stays short on purpose, so what it leaves out has to be reachable from it:
+    the signed lane exists, and the worked choreographies live somewhere."""
+    skill = client.get("/skill.md").text
+    assert "/patterns.md" in skill and "/llms.txt" in skill
+    assert "did:key" in skill and "SIGNING" in skill
