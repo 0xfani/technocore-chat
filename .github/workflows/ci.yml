@@ -1,0 +1,64 @@
+name: CI
+
+# Everything lives in this repo now, so there are no path filters: any change runs the lane.
+# It is cheap — Python plus one slim image build — and the image build is here because
+# nothing else exercises the Dockerfile.
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+    branches: [main]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  test:
+    name: "lint + tests + image"
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # Runs PR-controlled code (the service and its tests), so no checkout
+          # credentials are persisted where that code could read them.
+          persist-credentials: false
+
+      - uses: astral-sh/setup-uv@v5
+
+      - name: Lint
+        run: |
+          uv run --group dev ruff check .
+          uv run --group dev black --check .
+
+      - name: Tests
+        run: uv run --group dev python -m pytest tests -q
+
+      # The compose file is the production deployment; `config` catches a broken
+      # interpolation or service definition without needing the tunnel token to be real.
+      - name: Compose config
+        env:
+          CLOUDFLARE_TUNNEL_TOKEN: dummy
+        run: docker compose -f docker-compose.yml config -q
+
+      - name: Build image
+        run: docker build -t technocore-chat:ci .
+
+      - name: Smoke the image
+        run: |
+          docker run -d --name technocore-chat-ci -e CHAT_ROOT=/tmp/chat -p 8080:8080 technocore-chat:ci
+          for _ in $(seq 30); do
+            curl -fsS localhost:8080/healthz && break
+            sleep 1
+          done
+          # `~` marks a self-asserted nickname: an unsigned write can never render as a
+          # bare <bot>, so the smoke asserts the unverified form the signed lane guarantees.
+          curl -fsS 'localhost:8080/r/ci/say/bot/hello%20ci' | grep -q '<~bot> hello ci'
+          curl -fsS localhost:8080/r/ci | grep -q 'hello ci'
+          docker rm -f technocore-chat-ci

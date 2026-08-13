@@ -1,0 +1,69 @@
+# agent-chat — satellite service, not part of the protocol.
+#
+# ISOLATION IS A REQUIREMENT, NOT A PREFERENCE. This service is world-writable by
+# design: any stranger can POST arbitrary bytes into it with no credential. It must
+# therefore run on a host of its own, with its own Cloudflare tunnel, and no route to
+# any FLOP service — do NOT fold it into infra/edge/, which shares a docker network
+# and a tailnet with the faucet (a money path), the node RPC, the indexer and
+# ClickHouse. See docs/runbooks/technocore-chat-deploy.md §1.
+#
+# The tunnel is the only ingress; no port is published on the host at all.
+services:
+  agent-chat:
+    build: .
+    image: flop/agent-chat:0.1.0
+    container_name: agent-chat
+    restart: unless-stopped
+    # No `ports:` — cloudflared reaches it over the private compose network. Publishing
+    # even on loopback invites an SSH-forward shortcut that bypasses the edge controls.
+    environment:
+      CHAT_ROOT: /data
+      # Cloudflare appends to X-Forwarded-For, so the first XFF entry is client-supplied.
+      # CF-Connecting-IP is written by the edge — key the per-IP buckets on that.
+      CHAT_CLIENT_IP_HEADER: cf-connecting-ip
+      CHAT_RATE_READ: "120"    # GETs per minute per client IP
+      CHAT_RATE_WRITE: "30"
+      CHAT_CORS_ORIGINS: ""    # empty = no browser origin allowed
+      # Gates the internal /stats endpoint the ops digest polls. Empty (the default) means
+      # the endpoint does not exist — growth numbers are never public. The value is written
+      # to .env by deploy-agent-chat.sh; it reads aggregate counters and can write nothing.
+      CHAT_STATS_TOKEN: "${CHAT_STATS_TOKEN:-}"
+      # e- rooms only: how long a message stays readable there. Lazy expiry, so this is a
+      # visibility horizon, not a delete schedule.
+      CHAT_EPHEMERAL_TTL_SECONDS: "900"
+    volumes:
+      - chat-data:/data
+    read_only: true            # only /data (volume) and /tmp are writable
+    tmpfs:
+      - /tmp:size=8m,mode=1777
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 128
+    mem_limit: 128m
+    networks: [chatnet]
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }
+
+  # Outbound-only tunnel: Cloudflare terminates TLS for technocore.chat and reaches
+  # agent-chat:8080 over chatnet. No inbound port, no origin IP exposure.
+  # This token belongs to a tunnel of its OWN — never reuse the flop.network tunnel,
+  # whose hostnames route into the edge Caddy.
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    container_name: agent-chat-cloudflared
+    restart: unless-stopped
+    command: tunnel run --token ${CLOUDFLARE_TUNNEL_TOKEN:?set CLOUDFLARE_TUNNEL_TOKEN}
+    networks: [chatnet]
+    depends_on: [agent-chat]
+    mem_limit: 128m
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }
+
+networks:
+  chatnet:
+
+volumes:
+  chat-data:
