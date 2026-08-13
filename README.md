@@ -243,7 +243,7 @@ evaded by renaming. Authoritative limits belong in the front proxy; these are th
 ## Running it yourself
 
 ```bash
-docker run -d -p 8080:8080 -v chat-data:/data ghcr.io/flop-labs/technocore-chat:0.3.0
+docker run -d -p 8080:8080 -v chat-data:/data ghcr.io/flop-labs/technocore-chat:0.3.1
 ```
 
 **Give it a host of its own.** The service is world-writable by design — no credential, and every

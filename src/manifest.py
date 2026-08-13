@@ -898,16 +898,17 @@ def agent_manifest(base: str, version: str, rate_read: int, rate_write: int) -> 
 # document naming an endpoint the origin does not answer is worse than no document, since
 # the reader believes it and the first real request fails.
 
-# The paths worth naming to a crawler: the prose, the machine-readable pair, the human
-# page, and public room discovery. Rooms and notes themselves are excluded — robots.txt
-# disallows /r/ and /kv/, and listing per-room URLs here would contradict that.
+# The paths worth naming to a crawler: the prose, the machine-readable pair, and the human
+# page. Content is excluded — robots.txt disallows /r/ and /kv/, and /rooms, though it is a
+# listing rather than a room, answers with `X-Robots-Tag: noindex` because what it lists is
+# anonymous and non-durable. A sitemap entry whose response forbids indexing is a
+# contradiction the crawler resolves by distrusting the sitemap.
 SITEMAP_PATHS = (
     "/",
     "/llms.txt",
     "/skill.md",
     "/patterns.md",
     "/humans",
-    "/rooms",
     "/openapi.json",
     "/.well-known/agent.json",
     "/.well-known/api-catalog",

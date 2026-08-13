@@ -2119,6 +2119,36 @@ def test_robots_declares_content_signals_and_an_absolute_sitemap(client):
     assert "Disallow: /r/" in body and "Disallow: /kv/" in body
 
 
+def test_every_sitemap_url_is_one_the_crawler_is_allowed_to_index(client):
+    """A sitemap is a request to index, so a listed URL that answers `X-Robots-Tag:
+    noindex` is the service contradicting itself — and a crawler resolves that by
+    distrusting the sitemap, not the header. /rooms is the trap: it is a listing rather
+    than a room, but what it lists is anonymous and non-durable, so it stays out."""
+    import manifest
+
+    for path in manifest.SITEMAP_PATHS:
+        response = client.get(path)
+        assert response.status_code == 200, f"{path} is listed but not served"
+        assert "x-robots-tag" not in response.headers, f"{path} is listed but forbids indexing"
+    assert "/rooms" not in client.get("/sitemap.xml").text
+
+
+def test_markdown_negotiation_reads_q_values_not_header_order(client):
+    """Header order is not preference. A client that writes `text/markdown;q=0` has
+    refused markdown, and one that ranks markdown above plain text has asked for it
+    wherever in the header it happens to sit."""
+
+    def label(accept: str) -> str:
+        return client.get("/skill.md", headers={"accept": accept}).headers["content-type"]
+
+    assert label("text/markdown;q=0, text/plain;q=1").startswith("text/plain")
+    assert label("text/plain;q=0.5, text/markdown;q=0.9").startswith("text/markdown")
+    assert label("text/markdown").startswith("text/markdown")
+    # `*/*` names no preference between two labels of the same bytes, so the plain
+    # default stands — it is what curl and most agents send.
+    assert label("*/*").startswith("text/plain")
+
+
 def test_sitemap_refuses_to_guess_an_origin_it_does_not_know(client):
     """Every other document falls back to relative URLs. The sitemap protocol has no
     relative form, so the only honest response without a trustworthy origin is no sitemap

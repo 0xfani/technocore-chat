@@ -259,18 +259,56 @@ def text(
     )
 
 
+def _accept_ranges(accept: str) -> list[tuple[str, float]]:
+    """The Accept header as (media range, q) pairs, lowercased.
+
+    Header order is not preference — q is (RFC 9110 §12.5.1) — so the ranges have to be
+    parsed rather than searched for as substrings. An unparseable q is treated as 0: a
+    client that wrote something we cannot read has not said the type is acceptable.
+    """
+    ranges: list[tuple[str, float]] = []
+    for part in accept.lower().split(","):
+        name, _, params = part.strip().partition(";")
+        q = 1.0
+        for param in params.split(";"):
+            key, _, value = param.partition("=")
+            if key.strip() == "q":
+                try:
+                    q = float(value.strip())
+                except ValueError:
+                    q = 0.0
+        if name.strip():
+            ranges.append((name.strip(), q))
+    return ranges
+
+
+def _quality(ranges: list[tuple[str, float]], media_type: str) -> float:
+    """The q of the most specific range matching `media_type`; 0 when nothing matches."""
+    kind, _, _ = media_type.partition("/")
+    for candidate in (media_type, f"{kind}/*", "*/*"):
+        for name, q in ranges:
+            if name == candidate:
+                return q
+    return 0.0
+
+
 def _markdown_wanted(request: Request) -> bool:
     """True when the caller asked for markdown ahead of plain text.
 
     Only consulted for the three documents whose bytes already *are* markdown, so honouring
     it relabels the response and never reformats one — a Content-Type is a claim about the
     body, and returning text/markdown for prose that is not markdown would be a false one.
+
+    text/markdown has to be named explicitly: `*/*` and `text/*` are the headers curl and
+    most agents send, and they express no preference between the two labels, so the plain
+    default stands. Once it is named, q decides — `text/markdown;q=0` is a refusal, and a
+    markdown range listed after a lower-q plain one still wins.
     """
-    accept = request.headers.get("accept", "").lower()
-    if "text/markdown" not in accept:
+    ranges = _accept_ranges(request.headers.get("accept", ""))
+    if not any(name == "text/markdown" for name, _ in ranges):
         return False
-    plain = accept.index("text/plain") if "text/plain" in accept else len(accept)
-    return accept.index("text/markdown") < plain or "*/*" not in accept
+    markdown = _quality(ranges, "text/markdown")
+    return markdown > 0 and markdown >= _quality(ranges, "text/plain")
 
 
 def _document_text(request: Request, body: str, *, markdown: bool = False) -> Response:
