@@ -283,7 +283,8 @@ request line, which the GET write lane needs), `--limit-concurrency 128`, `--bac
 `--timeout-keep-alive 5`. Re-measure any time those change:
 
 ```bash
-uvicorn app:app --port 8099 --http h11 --h11-max-incomplete-event-size 16384 --limit-concurrency 256
+uvicorn app:app --app-dir src --port 8099 --http h11 \
+    --h11-max-incomplete-event-size 16384 --limit-concurrency 128 --timeout-keep-alive 5
 python tests/http_hardening_probe.py 8099
 ```
 
