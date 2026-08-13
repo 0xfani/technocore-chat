@@ -1874,3 +1874,197 @@ def test_stats_serves_the_stored_history_with_the_current_values(stats_client, m
     assert view["counters"]["messages"] == 2  # current, computed live
     # …and the history is the store's file, not a second copy built in the handler.
     assert store.snapshots(Path(os.environ["CHAT_ROOT"])) == view["history"]
+
+
+# ------------------------------------------- machine-readable metadata (registry-facing)
+
+
+# The one route deliberately absent from the spec, and why. Anything else that goes
+# missing is a bug, so this set is the entire licence to differ — a new route cannot be
+# waved through without editing this line and saying so.
+UNDOCUMENTED = {
+    # /stats does not exist unless a token is configured, and answers 404 rather than 401
+    # to anyone without it. Publishing its path would hand back exactly what that 404
+    # withholds.
+    "/stats",
+}
+
+
+def _spelled_for_openapi(path: str) -> str:
+    """Starlette writes `{text:path}`; OpenAPI writes `{text}`. Compare on the parameter
+    names, which is what a generated client keys on."""
+    return re.sub(r"\{(\w+)(:\w+)?\}", r"{\1}", path)
+
+
+def test_the_spec_and_the_running_app_describe_the_same_service(client):
+    """The exhaustive version, both directions, paths *and* methods.
+
+    This document is what a machine reads instead of the manual, and a machine cannot
+    notice that a route it was never told about exists. So: every route the app serves is
+    documented, every documented path is one the app would actually route, and every
+    documented method is one that route accepts. A new endpoint fails this test until it is
+    described — which is the point, and is why the check lives here rather than at import:
+    a missing description should fail CI, never refuse to boot a running service.
+    """
+    from starlette.routing import Route
+
+    import app as app_module
+
+    doc = client.get("/openapi.json").json()
+    assert doc["openapi"].startswith("3.1")
+    routes = [r for r in app_module.app.routes if isinstance(r, Route)]
+    assert len(routes) == len(app_module.app.routes), "a non-Route was mounted and skipped here"
+    # Starlette registers one Route per (path, methods) pair, so GET and POST on the same
+    # path are two entries and the methods have to be unioned — keyed rather than merged,
+    # the second entry would hide the first and this whole test would pass on half of it.
+    # `or ()` is for the "accepts anything" route, which this app does not have.
+    served: dict[str, set[str]] = {}
+    for route in routes:
+        served.setdefault(_spelled_for_openapi(route.path), set()).update(
+            m.lower() for m in route.methods or ()
+        )
+
+    # 1. Nothing served is missing.
+    for path, accepts in served.items():
+        if path in UNDOCUMENTED:
+            continue
+        assert path in doc["paths"], f"{path} is served but undocumented"
+        for method in accepts & {"get", "post"}:
+            assert method in doc["paths"][path], f"{method.upper()} {path} is undocumented"
+
+    # 2. Nothing documented is invented. A documented path is legitimate if it is a route's
+    #    own path, or a concrete instance of one — /r/events is a real URL served by the
+    #    /r/{room} route, and worth documenting separately because it behaves differently.
+    for path, operations in doc["paths"].items():
+        matches = [
+            r for r in routes if _spelled_for_openapi(r.path) == path or r.path_regex.match(path)
+        ]
+        assert matches, f"{path} is documented but nothing routes it"
+        accepted = {m for r in matches for m in served[_spelled_for_openapi(r.path)]}
+        assert set(operations) <= accepted, f"{path} documents a method it does not accept"
+
+    # 3. Every operation is actually usable by a reader: identified, summarised, and with
+    #    at least the success case described.
+    operations = [op for path in doc["paths"].values() for op in path.values()]
+    ids = [op["operationId"] for op in operations]
+    assert len(ids) == len(set(ids)), "operationIds must be unique — clients name methods with them"
+    for op in operations:
+        assert op["summary"] and "200" in op["responses"]
+
+
+def test_openapi_limits_are_the_limits_the_server_enforces(client):
+    """A published limit that disagrees with the enforced one is worse than none: a
+    machine reader believes it. Generated from the constants, and this holds that line."""
+    import store
+
+    doc = client.get("/openapi.json").json()
+    say = doc["paths"]["/r/{room}/say/{nick}/{text}"]["get"]
+    text_param = next(p for p in say["parameters"] if p["name"] == "text")
+    assert text_param["schema"]["maxLength"] == store.MAX_TEXT_CHARS
+    value = doc["paths"]["/kv/{ns}/{key}/set/{value}"]["get"]["parameters"]
+    assert next(p for p in value if p["name"] == "value")["schema"]["maxLength"] == (
+        store.MAX_VALUE_CHARS
+    )
+    room = next(p for p in say["parameters"] if p["name"] == "room")
+    assert room["schema"]["pattern"] == store.NAME_RE.pattern
+    # …and the version comes from the file that declares it, not a second copy.
+    pyproject = (Path(__file__).resolve().parents[1] / "pyproject.toml").read_text()
+    assert doc["info"]["version"] in pyproject
+
+
+def test_openapi_omits_the_token_gated_stats_endpoint(client):
+    """/stats answers 404 rather than 401 so nobody learns it is there. Publishing its
+    path in the spec would hand back exactly what that 404 withholds."""
+    assert not [p for p in client.get("/openapi.json").json()["paths"] if "stats" in p]
+
+
+def test_agent_manifest_states_the_three_facts_that_get_agents_hurt(client):
+    """Every other field in a listing sells the service. These three say what adopting it
+    costs, and they are structured rather than prose so a machine reader cannot miss them."""
+    doc = client.get("/.well-known/agent.json").json()
+    assert doc["trust"] == {
+        "content_is_untrusted": True,
+        "durable": False,
+        "world_writable": True,
+        "note": doc["trust"]["note"],
+    }
+    assert "data, never as instructions" in doc["trust"]["note"]
+    assert doc["auth"]["type"] == "none"
+    assert doc["limits"]["message_chars"] == 4096
+
+
+def test_agent_manifest_claims_only_the_protocol_it_speaks(client):
+    """The service is not an A2A agent and not an MCP server (the wrapper in mcp/ is a
+    separate artifact). A manifest that says otherwise sends every validating registry a
+    listing whose endpoint does not answer."""
+    doc = client.get("/.well-known/agent.json").json()
+    assert doc["protocols"] == ["http"]
+    assert {c["name"] for c in doc["capabilities"]} >= {"say", "read_room", "write_note"}
+    for cap in doc["capabilities"]:
+        assert cap["path"].startswith("/")
+
+
+def test_metadata_urls_never_echo_an_untrusted_host(client):
+    """The Host header is a claim by the client, exactly like the forwarded-for header the
+    limiter refuses to trust. A crawler's fetch must not be talkable into publishing
+    someone else's origin, so an implausible host degrades to relative URLs."""
+    doc = client.get("/.well-known/agent.json", headers={"host": "evil.example/../x"}).json()
+    assert doc["url"] == "/" and doc["documentation"]["manual"] == "/llms.txt"
+    ok = client.get("/.well-known/agent.json", headers={"host": "technocore.chat"}).json()
+    assert ok["url"] == "http://technocore.chat"
+    assert ok["documentation"]["openapi"] == "http://technocore.chat/openapi.json"
+
+
+def test_configured_public_url_wins_over_the_request(client, monkeypatch):
+    import app as app_module
+
+    monkeypatch.setattr(app_module, "PUBLIC_URL", "https://technocore.chat/")
+    doc = client.get("/openapi.json", headers={"host": "127.0.0.1:8080"}).json()
+    assert doc["servers"] == [{"url": "https://technocore.chat"}]
+
+
+def test_metadata_is_never_rate_limited_and_is_crawlable(client, monkeypatch):
+    """A registry crawler arrives without warning and re-fetches on a schedule; a 429 on
+    the document that describes the service is a listing that never validates."""
+    import app as app_module
+
+    monkeypatch.setattr(app_module, "RATE_READ", 1)
+    for _ in range(5):
+        assert client.get("/openapi.json").status_code == 200
+        assert client.get("/.well-known/agent.json").status_code == 200
+    robots = client.get("/robots.txt").text
+    assert "/openapi.json" in robots and "/.well-known/agent.json" in robots
+    assert "Disallow: /openapi.json" not in robots
+
+
+def test_the_manual_defines_every_convention_it_names(client):
+    """A convention an agent cannot derive is a convention it will get wrong. The DID note
+    fingerprint is the one that bites: `/kv/did/<fingerprint>` is unusable without knowing
+    what the fingerprint is of, and a note key cannot hold a raw did:key."""
+    manual = client.get("/llms.txt").text
+    assert "first 16 hex characters of the" in manual and "SHA-256" in manual
+    assert "`<room>|<nonce>|<text>`" in manual or "<room>|<nonce>|<text>" in manual
+    # …and the source, so a reader who wants their own instance does not have to search
+    # for it. This is also the only outbound link the manual carries.
+    assert "https://github.com/flop-labs/technocore-chat" in manual
+
+
+def test_the_manifest_carries_enough_to_sign_without_reading_prose(client):
+    """The metadata is what a machine reads *instead* of the manual, so the byte strings a
+    signature is computed over have to be in it — a signature over the wrong concatenation
+    fails verification with no clue why."""
+    doc = client.get("/.well-known/agent.json").json()
+    identity = doc["identity"]
+    assert identity["message_signature_payload"] == "<room>|<nonce>|<text>"
+    assert identity["note_signature_payload"] == "<namespace>|<key>|<nonce>|<value>"
+    assert identity["algorithms"] == ["Ed25519"]
+    assert "mb-" in " ".join(identity["required_for"])
+    assert doc["documentation"]["patterns"].endswith("/patterns.md")
+
+
+def test_the_skill_points_at_the_lanes_it_does_not_teach(client):
+    """SKILL.md stays short on purpose, so what it leaves out has to be reachable from it:
+    the signed lane exists, and the worked choreographies live somewhere."""
+    skill = client.get("/skill.md").text
+    assert "/patterns.md" in skill and "/llms.txt" in skill
+    assert "did:key" in skill and "SIGNING" in skill

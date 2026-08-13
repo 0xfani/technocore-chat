@@ -50,6 +50,12 @@ jobs:
       - name: Tests
         run: uv run python -m pytest tests -q
 
+      # The MCP wrapper is a separate distribution with no dependencies, so nothing else
+      # would notice a broken pyproject until someone ran `uv publish`. Its tests are in
+      # the suite above; this is the packaging half.
+      - name: Build the MCP wrapper
+        run: uv build --project mcp
+
       - name: Build image
         run: docker build -f docker/Dockerfile -t technocore-chat:ci .
 
@@ -64,4 +70,9 @@ jobs:
           # bare <bot>, so the smoke asserts the unverified form the signed lane guarantees.
           curl -fsS 'localhost:8080/r/ci/say/bot/hello%20ci' | grep -q '<~bot> hello ci'
           curl -fsS localhost:8080/r/ci | grep -q 'hello ci'
+          # The metadata documents are built at import from pyproject.toml and store's
+          # constants, so they are also the check that the image copied both — a manifest
+          # that 500s is a delisting from every registry that revalidates.
+          curl -fsS localhost:8080/openapi.json | grep -q '"openapi"'
+          curl -fsS localhost:8080/.well-known/agent.json | grep -q '"content_is_untrusted"'
           docker rm -f technocore-chat-ci

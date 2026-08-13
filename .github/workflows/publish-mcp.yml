@@ -1,0 +1,91 @@
+name: Publish MCP wrapper
+
+# Tag-driven and separate from the service release, because they version independently:
+# `v0.3.0` ships the server image, `mcp-v0.1.0` ships the wrapper. One tag doing both would
+# force a wrapper release every time a rate limit changed.
+#
+# ONE-TIME SETUP, both of them outside this file:
+#   1. PyPI trusted publishing — https://pypi.org/manage/project/technocore-mcp/settings/publishing/
+#      (or the pending-publisher form if the name is unclaimed). Owner `flop-labs`,
+#      repository `technocore-chat`, workflow `publish-mcp.yml`, environment `pypi`.
+#      No token is stored anywhere: the job authenticates with its OIDC identity.
+#   2. Nothing for the MCP registry. The `io.github.flop-labs/*` namespace is proven by the
+#      same OIDC identity, and package ownership by the `mcp-name:` line in mcp/README.md.
+on:
+  workflow_dispatch:
+  push:
+    tags: ["mcp-v*"]
+
+jobs:
+  publish:
+    name: "PyPI + MCP registry"
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: pypi
+    permissions:
+      contents: read
+      # Both publishes are OIDC: PyPI trusted publishing, and the registry's namespace proof.
+      id-token: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - uses: astral-sh/setup-uv@v5
+
+      # Three places claim this version and a mismatch publishes something other than what it
+      # says. server.json carries it twice — once for the server, once for the package — and
+      # server.py's VERSION is what `initialize` and the User-Agent report; the wheel derives
+      # its own from that constant, so pyproject has no literal to check.
+      - name: Check the tag matches every version that claims it
+        run: |
+          tag="${GITHUB_REF_NAME#mcp-v}"
+          code=$(grep -m1 '^VERSION = ' mcp/src/technocore_mcp/server.py | cut -d'"' -f2)
+          srv=$(python -c 'import json;d=json.load(open("mcp/server.json"));print(d["version"])')
+          pkg=$(python -c 'import json;d=json.load(open("mcp/server.json"));print(d["packages"][0]["version"])')
+          echo "tag=$tag server.py=$code server.json=$srv package=$pkg"
+          [ "$tag" = "$code" ] && [ "$tag" = "$srv" ] && [ "$tag" = "$pkg" ] ||
+            { echo "::error::version mismatch between the tag, server.py's VERSION and mcp/server.json"; exit 1; }
+
+      # The registry matches this against server.json's `name` to prove we own the PyPI
+      # package. It fails there, after the release is public — cheaper to fail here.
+      - name: Check the PyPI ownership marker is present
+        run: |
+          name=$(python -c 'import json;print(json.load(open("mcp/server.json"))["name"])')
+          grep -q "mcp-name: $name" mcp/README.md ||
+            { echo "::error::mcp/README.md is missing the 'mcp-name: $name' marker"; exit 1; }
+
+      - name: Test
+        run: uv sync --frozen && uv run python -m pytest tests/test_mcp.py -q
+
+      - name: Build
+        run: uv build --project mcp
+
+      - name: Publish to PyPI
+        run: uv publish mcp/dist/*
+
+      # Wait for the file to be servable before telling the registry to go look at it: the
+      # registry fetches the PyPI JSON API to validate ownership, and a publish that has not
+      # propagated reads as a package that does not exist.
+      - name: Wait for PyPI to serve the new version
+        run: |
+          tag="${GITHUB_REF_NAME#mcp-v}"
+          for _ in $(seq 30); do
+            if curl -fsS "https://pypi.org/pypi/technocore-mcp/$tag/json" >/dev/null; then
+              echo "visible on PyPI"; exit 0
+            fi
+            sleep 10
+          done
+          echo "::error::technocore-mcp $tag not visible on PyPI after 5 minutes"; exit 1
+
+      - name: Install mcp-publisher
+        run: |
+          curl -fsSL "https://github.com/modelcontextprotocol/registry/releases/latest/download/mcp-publisher_$(uname -s | tr '[:upper:]' '[:lower:]')_$(uname -m | sed 's/x86_64/amd64/').tar.gz" \
+            | tar xz mcp-publisher
+          ./mcp-publisher --version
+
+      - name: Publish to the MCP registry
+        working-directory: mcp
+        run: |
+          ../mcp-publisher login github-oidc
+          ../mcp-publisher publish

@@ -1,0 +1,37 @@
+[project]
+name = "technocore-mcp"
+# Derived from `VERSION` in src/technocore_mcp/server.py, which is the version `initialize`
+# reports and the one in the outgoing User-Agent. A literal here could be bumped while that
+# constant stayed behind, publishing a release that identifies itself as the previous one.
+dynamic = ["version"]
+description = "MCP server for technocore-chat: shared rooms, durable notes and rendezvous for agents, over plain HTTP"
+readme = "README.md"
+license = "Apache-2.0"
+requires-python = ">=3.11"
+# Empty, and that is the point: the service it wraps needs no client library, so neither
+# does this. `uvx technocore-mcp` resolves nothing and starts immediately.
+dependencies = []
+keywords = ["mcp", "agent", "chat", "rendezvous", "coordination", "multi-agent"]
+classifiers = [
+    "License :: OSI Approved :: Apache Software License",
+    "Programming Language :: Python :: 3",
+    "Topic :: Communications :: Chat",
+]
+
+[project.urls]
+Homepage = "https://technocore.chat"
+Source = "https://github.com/flop-labs/technocore-chat"
+Documentation = "https://technocore.chat/llms.txt"
+
+[project.scripts]
+technocore-mcp = "technocore_mcp.server:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.version]
+path = "src/technocore_mcp/server.py"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/technocore_mcp"]

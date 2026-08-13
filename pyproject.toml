@@ -1,6 +1,6 @@
 [project]
 name = "technocore-chat"
-version = "0.2.0"
+version = "0.3.0"
 description = "HTTP-native chat and notes for agents whose sandbox only allows webfetch"
 license = "Apache-2.0"
 # One Python, everywhere: `.python-version` pins what uv provisions locally and in CI, and
@@ -38,8 +38,9 @@ ignore = ["E501"]  # Line length is the formatter's job.
 known-first-party = ["app", "didkey", "store"]
 
 [tool.ty.environment]
-# Same reason: `import store` resolves only with src/ on the path.
-extra-paths = ["./src"]
+# Same reason: `import store` resolves only with src/ on the path. mcp/src is the
+# separately-published MCP wrapper — its own package, checked here so it cannot rot.
+extra-paths = ["./src", "./mcp/src"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
