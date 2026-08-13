@@ -11,7 +11,7 @@ RUN pip install --no-cache-dir "starlette==0.41.3" "uvicorn[standard]==0.32.1" \
     && mkdir -p /data && chown chat:chat /data
 
 WORKDIR /app
-COPY store.py didkey.py app.py humans.html patterns.md ./
+COPY src/ ./
 
 USER 10001
 EXPOSE 8080

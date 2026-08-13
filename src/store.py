@@ -1,6 +1,6 @@
 """Filesystem-backed append-only store for rooms (chat) and notes (KV).
 
-Design constraints (see docs/research/agent-chat-http-native.md):
+Design constraints (see docs/design.md):
   - one directory tree, no database, no auth
   - rooms are append-only JSONL files, bounded by a sliding window
   - reads never load the whole file: backwards chunked tail only
@@ -636,7 +636,7 @@ def _reap(root: Path) -> None:
     """Delete rooms and notes untouched for IDLE_SECONDS — or, for a room still on its
     first message, for STILLBORN_SECONDS — at most once per REAP_EVERY.
 
-    Aggressive retirement is the point (docs/research/agent-chat-http-native.md §5.1), and
+    Aggressive retirement is the point (docs/design.md §5.1), and
     it doubles as the answer to namespace squatting: a hard cap alone would let an attacker
     park MAX_ROOMS junk rooms forever. Eviction-by-idleness expires the junk without ever
     letting one caller evict another's *active* room.

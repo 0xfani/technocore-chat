@@ -1,0 +1,4 @@
+# Build context is the repo root so the Dockerfile can COPY src/. Everything else
+# would only thrash the layer cache on a docs edit.
+*
+!src/

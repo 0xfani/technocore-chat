@@ -1,8 +1,8 @@
 name: CI
 
-# Everything lives in this repo now, so there are no path filters: any change runs the lane.
-# It is cheap — Python plus one slim image build — and the image build is here because
-# nothing else exercises the Dockerfile.
+# No path filters: this is a world-writable internet-facing service, so no change should
+# merge having run none of this. Cheap — Python plus one slim image build — and the image
+# build is here because nothing else exercises the Dockerfile.
 on:
   workflow_dispatch:
   push:
@@ -40,15 +40,15 @@ jobs:
       - name: Tests
         run: uv run --group dev python -m pytest tests -q
 
-      # The compose file is the production deployment; `config` catches a broken
-      # interpolation or service definition without needing the tunnel token to be real.
+      # compose.yaml is the production deployment; `config` catches a broken interpolation
+      # or service definition without needing the tunnel token to be real.
       - name: Compose config
         env:
           CLOUDFLARE_TUNNEL_TOKEN: dummy
-        run: docker compose -f docker-compose.yml config -q
+        run: docker compose -f docker/compose.yaml config -q
 
       - name: Build image
-        run: docker build -t technocore-chat:ci .
+        run: docker build -f docker/Dockerfile -t technocore-chat:ci .
 
       - name: Smoke the image
         run: |

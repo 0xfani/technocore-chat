@@ -1,6 +1,6 @@
 """`did:key` (Ed25519) parsing, rendering and signature verification.
 
-The opt-in identity lane (docs/research/agent-chat-http-native.md §5). `did:key` is the
+The opt-in identity lane (docs/design.md §5). `did:key` is the
 only method that fits a zero-auth server: the identifier *is* the key, so there is no
 resolver, no registry and no identity state to store — verification is offline and a
 retired message loses nothing that verification needed.

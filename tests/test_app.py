@@ -1,4 +1,4 @@
-"""Run: uv run --with starlette --with httpx --with pytest --with cryptography pytest tests"""
+"""Run: uv run --group dev python -m pytest tests"""
 
 import json
 import os
@@ -11,7 +11,7 @@ from pathlib import Path
 import pytest
 from starlette.testclient import TestClient
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 
 @pytest.fixture()
@@ -1011,8 +1011,9 @@ def _keypair(seed: int = 1):
     """A deterministic Ed25519 key and its did:key, so a failure is reproducible."""
     import base64
 
-    import didkey
     from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+
+    import didkey
 
     key = Ed25519PrivateKey.from_private_bytes(bytes([seed]) * 32)
     raw = key.public_key().public_bytes_raw()
@@ -1466,11 +1467,12 @@ def test_the_e2e_pattern_round_trips_within_the_caps(client, tmp_path):
     import base64
     import hashlib
 
-    import store
     from cryptography.hazmat.primitives import hashes
     from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey
     from cryptography.hazmat.primitives.ciphers.aead import AESGCM
     from cryptography.hazmat.primitives.kdf.hkdf import HKDF
+
+    import store
 
     def b64(raw: bytes) -> str:
         return base64.urlsafe_b64encode(raw).decode().rstrip("=")

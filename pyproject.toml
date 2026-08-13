@@ -2,8 +2,9 @@
 name = "technocore-chat"
 version = "0.1.0"
 description = "HTTP-native chat and notes for agents whose sandbox only allows webfetch"
+license = "Apache-2.0"
 requires-python = ">=3.10"
-# Pinned, not ranged, and identical to the Dockerfile: the signed lane is a security
+# Pinned, not ranged, and identical to docker/Dockerfile: the signed lane is a security
 # boundary, so the version that ships is the version tested. Change both together.
 dependencies = [
     "starlette==0.41.3",
@@ -19,9 +20,6 @@ dev = [
     "ruff>=0.16.1",
 ]
 
-# Lint/format values mirror the FLOP monorepo root exactly. Any drift and `black --check`
-# reformats files that pass there, so the two copies diverge on whitespace before anyone
-# edits them — see MIGRATION.md.
 [tool.ruff]
 line-length = 100
 target-version = "py310"
@@ -30,13 +28,11 @@ target-version = "py310"
 select = ["E", "F", "W", "I", "N", "UP", "B", "C4"]
 ignore = ["E501"]  # Line length handled by black
 
-# app.py imports store and didkey as plain top-level modules — they are copied flat into
-# the image, not installed as a package. At the repo root ruff reads them as first-party
-# and wants them in a section of their own; in the monorepo they sat inside
-# services/agent-chat/ and sorted as third-party. Declaring that keeps the source here
-# byte-identical to the monorepo copy, which is the whole point until cutover.
 [tool.ruff.lint.isort]
-known-third-party = ["app", "didkey", "store"]
+# app.py imports store and didkey as plain top-level modules — they ship flat into the
+# image and are imported by path, never installed. Telling ruff they are first-party
+# keeps the import blocks sorted the way the code is actually laid out.
+known-first-party = ["app", "didkey", "store"]
 
 [tool.black]
 line-length = 100
@@ -45,7 +41,7 @@ target-version = ["py310"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 
-# There is no installable package here — app.py/store.py/didkey.py are copied into the
-# image and imported by path. Without this, uv tries to build a wheel and fails.
+# Not an installable package: src/ is copied into the image and imported by path.
+# Without this, uv tries to build a wheel and fails.
 [tool.uv]
 package = false

@@ -1,17 +1,23 @@
-# agent-chat — satellite service, not part of the protocol.
+# The production deployment: the app plus its own cloudflared. Not a local runner —
+# it publishes no ports and needs a real tunnel token.
 #
 # ISOLATION IS A REQUIREMENT, NOT A PREFERENCE. This service is world-writable by
-# design: any stranger can POST arbitrary bytes into it with no credential. It must
-# therefore run on a host of its own, with its own Cloudflare tunnel, and no route to
-# any FLOP service — do NOT fold it into infra/edge/, which shares a docker network
-# and a tailnet with the faucet (a money path), the node RPC, the indexer and
-# ClickHouse. See docs/runbooks/technocore-chat-deploy.md §1.
+# design: any stranger can write arbitrary bytes into it with no credential. It must
+# run on a host of its own, with its own Cloudflare tunnel, and no route to anything
+# else you operate. See ../docs/deploy.md §1.
 #
 # The tunnel is the only ingress; no port is published on the host at all.
+#
+# The service is still named `agent-chat` here, and the deploy tooling matches on that
+# name. Renaming it is cosmetic and would be a second simultaneous change during the
+# image cutover, so it waits.
 services:
   agent-chat:
-    build: .
-    image: flop/agent-chat:0.1.0
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    # Pinned, never `latest`: the deploy's safety story is knowing exactly what is running.
+    image: ghcr.io/flop-labs/technocore-chat:0.1.0
     container_name: agent-chat
     restart: unless-stopped
     # No `ports:` — cloudflared reaches it over the private compose network. Publishing
