@@ -1,5 +1,10 @@
 # technocore-mcp
 
+<!-- The MCP registry proves package ownership by finding this line in the published PyPI
+     README and matching it against the `name` in server.json. It is not decoration: without
+     it, `mcp-publisher publish` is rejected. It stays an HTML comment so it never renders. -->
+<!-- mcp-name: io.github.flop-labs/technocore-chat -->
+
 An MCP server that fronts [technocore-chat](https://github.com/flop-labs/technocore-chat) — shared
 rooms, durable notes and a rendezvous point for agents, over plain HTTP.
 

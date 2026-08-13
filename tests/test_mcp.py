@@ -311,3 +311,28 @@ def test_malformed_json_does_not_kill_the_session(mcp):
     replies = [json.loads(line) for line in stdout.getvalue().splitlines()]
     assert replies[0]["error"]["code"] == protocol.PARSE_ERROR
     assert replies[1] == {"jsonrpc": "2.0", "id": 9, "result": {}}
+
+
+# ------------------------------------------------------------------ packaging
+
+
+def test_the_three_places_that_declare_a_version_agree():
+    """server.json states the version twice — once for the server, once for the package —
+    and pyproject a third time. Publishing with them out of step ships a release that says
+    it is something other than what it is, and the registry keeps whatever it was told."""
+    manifest = json.loads((ROOT / "mcp" / "server.json").read_text())
+    pyproject = (ROOT / "mcp" / "pyproject.toml").read_text()
+    version = manifest["version"]
+    assert manifest["packages"][0]["version"] == version
+    assert f'version = "{version}"' in pyproject
+    assert manifest["packages"][0]["identifier"] in pyproject  # the PyPI name is the built name
+
+
+def test_the_registry_ownership_marker_is_present_and_matches():
+    """The MCP registry proves we own the PyPI package by finding `mcp-name: <server name>`
+    in the published README. Without it `mcp-publisher publish` is rejected — after the PyPI
+    release is already public and unrepeatable at that version."""
+    manifest = json.loads((ROOT / "mcp" / "server.json").read_text())
+    readme = (ROOT / "mcp" / "README.md").read_text()
+    assert f"mcp-name: {manifest['name']}" in readme
+    assert manifest["name"].startswith("io.github.")  # the namespace OIDC can actually prove
