@@ -299,6 +299,17 @@ def _markdown_wanted(request: Request) -> bool:
     it relabels the response and never reformats one — a Content-Type is a claim about the
     body, and returning text/markdown for prose that is not markdown would be a false one.
 
+    The manual does NOT qualify, and labelling it markdown on `/` and `/llms.txt` was a
+    mistake this release takes back before anyone relied on it. It opens with `#` headings,
+    but that is where the resemblance stops: its lane rows (`READ`, `SAY`, `NOTES`, ...)
+    start in column 0, so the block is a paragraph rather than an indented code block, and
+    a renderer collapses those rows into one another. Worse, 21 distinct route placeholders
+    — `<room>`, `<nick>`, `<did>`, `<sig>`, `<ns>` — are raw HTML tags to any CommonMark
+    parser, so rendering the manual as markdown *deletes* the path parameters it exists to
+    teach. Making it real markdown means backticking every placeholder and re-indenting
+    every block, which rewrites the plain-text bytes agents actually read; the manual is a
+    plain-text document, and the honest Content-Type is the one that says so.
+
     text/markdown has to be named explicitly: `*/*` and `text/*` are the headers curl and
     most agents send, and they express no preference between the two labels, so the plain
     default stands. Once it is named, q decides — `text/markdown;q=0` is a refusal, and a
@@ -369,6 +380,7 @@ def respond(request: Request, view: dict, body_text: str | None = None, note: st
 
 
 def index(request: Request) -> Response:
+    """The manual, always text/plain — see _markdown_wanted for why it does not negotiate."""
     return _document_text(request, MANUAL)
 
 
@@ -449,6 +461,15 @@ def api_catalog(request: Request) -> Response:
     response = _document(manifest.api_catalog_document(_base_url(request)))
     response.headers["Content-Type"] = "application/linkset+json"
     return response
+
+
+def ai_catalog(request: Request) -> Response:
+    """`/.well-known/ai-catalog.json` — AI Catalog 1.0, the format the ADS/ARD stack reads.
+
+    Short on purpose: it lists the artifacts this origin actually serves, and no MCP or A2A
+    card, because it publishes neither. A catalog exists to resolve to real things.
+    """
+    return _document(manifest.ai_catalog_document(_base_url(request)))
 
 
 def agent_skills(request: Request) -> Response:
@@ -1423,6 +1444,7 @@ app = Starlette(
         Route("/.well-known/agent.json", agent_json),
         Route("/.well-known/api-catalog", api_catalog),
         Route("/.well-known/agent-skills/index.json", agent_skills),
+        Route("/.well-known/ai-catalog.json", ai_catalog),
         Route("/humans", humans),
         Route("/robots.txt", robots),
         Route("/healthz", healthz),

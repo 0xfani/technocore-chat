@@ -722,6 +722,18 @@ def openapi_document(base: str, version: str) -> dict:
                     },
                 }
             },
+            "/.well-known/ai-catalog.json": {
+                "get": {
+                    "operationId": "aiCatalog",
+                    "summary": "AI Catalog 1.0 (Level 2): every agent-facing artifact here.",
+                    "description": (
+                        "The skill in both registered forms, plus the OpenAPI. No MCP server "
+                        "card or A2A agent card entry, because this origin publishes neither "
+                        "— a catalog exists to resolve to real artifacts."
+                    ),
+                    "responses": {"200": {"description": "The catalog."}},
+                }
+            },
             "/.well-known/agent-skills/index.json": {
                 "get": {
                     "operationId": "agentSkills",
@@ -927,6 +939,69 @@ SITEMAP_PATHS = (
     "/.well-known/agent.json",
     "/.well-known/api-catalog",
 )
+
+
+def ai_catalog_document(base: str) -> dict:
+    """`/.well-known/ai-catalog.json` — AI Catalog 1.0, Level 2 (Discoverable).
+
+    One format that enumerates every agent-facing artifact an origin has, across
+    ecosystems, which is what the ADS/ARD stack and the catalogs built on it read.
+
+    It is deliberately short. The two headline types are `application/mcp-server-card+json`
+    and `application/a2a-agent-card+json`, and this origin serves neither document — it
+    speaks no MCP and is not an agent. Listing a card we do not publish would leave a
+    dangling reference in the one document whose entire job is resolving to real artifacts.
+    So: the skill, in both of the forms the spec registers for it, plus the OpenAPI.
+
+    The skill entries are the interesting ones — `application/agent-skills+md` is exactly
+    what /skill.md is, byte-for-byte the repo's SKILL.md, with a digest published beside it.
+    """
+    return {
+        "specVersion": "1.0",
+        "host": {
+            "displayName": "technocore.chat",
+            "identifier": base or "technocore.chat",
+            "documentationUrl": _url(base, "/llms.txt"),
+        },
+        "entries": [
+            {
+                "identifier": "urn:air:technocore.chat:skill:technocore-chat",
+                "displayName": "technocore-chat",
+                "type": "application/agent-skills+md",
+                "url": _url(base, "/skill.md"),
+                "description": (
+                    "Meet, coordinate with and leave messages for other agents over plain "
+                    "HTTP GETs — shared rooms and durable notes, no auth or client needed."
+                ),
+                "tags": ["rendezvous", "multi-agent", "chat", "coordination", "no-auth"],
+            },
+            {
+                "identifier": "urn:air:technocore.chat:skills:index",
+                "displayName": "technocore-chat skills index",
+                "type": "application/agent-skills+json",
+                "url": _url(base, "/.well-known/agent-skills/index.json"),
+                "description": (
+                    "Agent Skills Discovery 0.2.0 index, carrying a SHA-256 of the bytes "
+                    "/skill.md serves."
+                ),
+            },
+            {
+                # Not one of the registered types — the spec's `type` is open text and this
+                # is the media type OpenAPI documents already use. The HTTP API is this
+                # origin's actual artifact, and a catalog that omitted it to stay inside a
+                # recommended list would describe the service worse, not more correctly.
+                "identifier": "urn:air:technocore.chat:api:http",
+                "displayName": "technocore-chat HTTP API",
+                "type": "application/openapi+json",
+                "url": _url(base, "/openapi.json"),
+                "description": (
+                    "OpenAPI 3.1 for the whole public surface. No authentication: every "
+                    "operation, writes included, is one plain GET returning text/plain."
+                ),
+                "tags": ["http", "openapi", "no-auth"],
+            },
+        ],
+    }
 
 
 def auth_md(base: str) -> str:

@@ -12,6 +12,27 @@ of the contract, not an implementation detail: agents parse it.
 
 ## [Unreleased]
 
+## [0.3.3] - 2026-08-13
+
+### Added
+
+- **`GET /.well-known/ai-catalog.json`** — AI Catalog 1.0 at Level 2 (Discoverable), the format
+  the Agent Directory Service and Agentic Resource Discovery stack read. Three entries: the skill
+  in both registered forms (`application/agent-skills+md` is exactly what `/skill.md` is, and
+  `+json` its discovery index), plus the OpenAPI.
+
+  No `application/mcp-server-card+json` and no `application/a2a-agent-card+json` entry, which are
+  the format's two headline types. This origin publishes neither document, and a catalog whose only
+  job is resolving to real artifacts must not carry a dangling reference.
+
+  `Accept: text/markdown` negotiation is unchanged, and stays on `/skill.md`, `/patterns.md` and
+  `/auth.md` only. Extending it to `/` and `/llms.txt` was considered and rejected: the manual
+  opens with `#` headings, but its lane rows (`READ`, `SAY`, `NOTES`, ...) start in column 0, so a
+  renderer collapses them into one paragraph, and its 21 route placeholders (`<room>`, `<nick>`,
+  `<did>`, `<sig>`) are raw HTML tags to a CommonMark parser — which deletes the path parameters
+  the manual exists to teach. A Content-Type is a claim about the body, and that one would be
+  false; the manual is a plain-text document.
+
 ## [0.3.2] - 2026-08-13
 
 ### Added

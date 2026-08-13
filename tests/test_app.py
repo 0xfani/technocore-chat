@@ -1566,17 +1566,53 @@ def test_skill_md_is_the_same_manual_and_is_never_rate_limited(client, monkeypat
 # ------------------------------------------------------- /humans permalinks, no links
 
 
-def test_the_human_page_contains_no_navigating_element_at_all(client):
-    """The hard invariant. Every message on the page was written by an anonymous agent,
-    so nothing on it may have navigation as its default action — a URL a reader cannot
-    click is a URL a reader cannot be steered into. Sharing is copy-to-clipboard instead."""
+def test_no_link_on_the_human_page_can_come_from_a_message(client):
+    """The hard invariant, stated as what it actually protects.
+
+    It used to be "not one anchor anywhere", which was a cheap way to guarantee the real
+    property and cost the page its own documentation — the footer's /llms.txt and /rooms
+    were unclickable text, and the one thing a human landing here most needs is a way into
+    the manual. The property that matters is narrower: a reader must never be able to click
+    something an *anonymous agent* wrote.
+
+    So: the page may link paths written into the file itself, and the script may never
+    build an anchor or navigate. Message bodies, room names and topics all reach the DOM
+    through textContent, which cannot produce an element of any kind, let alone one with a
+    default action.
+    """
     import re as _re
 
     body = client.get("/humans").text
-    assert not _re.search(r"<a[\s>]", body, _re.I)  # not one anchor, opening or otherwise
-    assert "href" not in body.lower()
-    assert "document.createElement('a')" not in body
+
+    # 1. Nothing constructs a link, or navigates, at runtime. This is the guard that stands
+    #    between agent-written text and a clickable element.
+    assert "createElement('a')" not in body and 'createElement("a")' not in body
     assert "window.open" not in body and "location.assign" not in body
+    # Assignment, not the word: the script carries a comment promising it never writes
+    # innerHTML, and a check that banned the string would fail on the promise itself.
+    assert not _re.search(r"\.innerHTML\s*=", body), (
+        "textContent only — innerHTML can yield an anchor"
+    )
+
+    # 2. Every href that *is* served is first-party: a path on this origin, or the source
+    #    repo. Both are written into the page; neither can be influenced by a room.
+    hrefs = _re.findall(r'href="([^"]*)"', body)
+    assert hrefs, "the page should link its own documents"
+    for href in hrefs:
+        assert href.startswith("/") or href == "https://github.com/flop-labs/technocore-chat", (
+            f"{href!r} is not a first-party path"
+        )
+    assert "/llms.txt" in hrefs and "/skill.md" in hrefs
+
+
+def test_the_human_page_tells_an_agent_how_to_connect(client):
+    """A human who lands here is usually deciding whether to point an agent at this, so the
+    three ways in — fetch, skill, MCP — each need a line that can be pasted somewhere and
+    work, not a description of the fact that they exist."""
+    body = client.get("/humans").text
+    assert "uvx technocore-mcp" in body
+    assert "https://technocore.chat/llms.txt and follow it" in body
+    assert "flop-labs/technocore-chat" in body
 
 
 def test_the_human_page_shares_by_copying_a_fragment_permalink(client):
@@ -2194,3 +2230,45 @@ def test_no_oauth_metadata_is_served_for_an_issuer_that_does_not_exist(client):
 def test_auth_md_is_reachable_from_the_sitemap(client):
     """A document no crawler is told about is a document the scanners will not find."""
     assert "/auth.md" in client.get("/sitemap.xml").text
+
+
+def test_only_the_markdown_documents_negotiate_markdown(client):
+    """Negotiation relabels bytes, it never reformats them, so a document only negotiates
+    when its bytes really are markdown. /auth.md, /skill.md and /patterns.md are; the manual
+    is not, and / and /llms.txt therefore answer text/plain even when markdown is named."""
+    md = {"Accept": "text/markdown"}
+    for path in ("/skill.md", "/patterns.md", "/auth.md"):
+        got = client.get(path, headers=md).headers["content-type"]
+        assert got.startswith("text/markdown"), f"{path} answered {got}"
+        assert client.get(path).headers["content-type"].startswith("text/plain")
+    for path in ("/", "/llms.txt"):
+        got = client.get(path, headers=md).headers["content-type"]
+        assert got.startswith("text/plain"), f"{path} answered {got}"
+
+
+def test_the_manual_is_not_markdown_and_so_is_never_labelled_as_such(client):
+    """The claim behind the label, tested rather than assumed — which is what 0.3.3's first
+    cut got wrong in the other direction. Route placeholders are raw HTML tags to a
+    CommonMark parser, so rendering the manual as markdown deletes the very path parameters
+    it exists to teach, and its unindented lane rows collapse into one paragraph."""
+    body = client.get("/").text
+    assert re.search(r"<[A-Za-z][A-Za-z0-9-]*>", body)  # e.g. <room>, would be eaten
+    assert body.splitlines()[3].startswith("READ")  # column 0: a paragraph, not a code block
+    negotiated = client.get("/", headers={"Accept": "text/markdown"})
+    assert negotiated.headers["content-type"].startswith("text/plain")
+
+
+def test_the_ai_catalog_lists_only_artifacts_that_resolve(client):
+    """A catalog exists to resolve to real things. Every entry's url must be served here,
+    and no entry may claim an MCP server card or A2A agent card, because this origin
+    publishes neither document."""
+    doc = client.get("/.well-known/ai-catalog.json").json()
+    assert doc["specVersion"] == "1.0" and doc["host"]["displayName"]
+    types = {e["type"] for e in doc["entries"]}
+    assert "application/mcp-server-card+json" not in types
+    assert "application/a2a-agent-card+json" not in types
+    assert "application/agent-skills+md" in types
+    for entry in doc["entries"]:
+        assert entry["identifier"] and entry["type"] and entry["url"]
+        path = entry["url"].split("testserver", 1)[-1] or "/"
+        assert client.get(path).status_code == 200, f"{entry['identifier']} -> {path}"
