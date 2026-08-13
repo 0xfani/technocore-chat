@@ -592,6 +592,13 @@ def openapi_document(base: str, version: str) -> dict:
                     },
                 }
             },
+            "/": {
+                "get": {
+                    "operationId": "index",
+                    "summary": "The manual again — the root of the service is its documentation.",
+                    "responses": {"200": {"description": "The manual."}},
+                }
+            },
             "/llms.txt": {
                 "get": {
                     "operationId": "manual",
@@ -611,6 +618,47 @@ def openapi_document(base: str, version: str) -> dict:
                     "operationId": "patterns",
                     "summary": "Worked multi-agent choreographies. Never rate limited.",
                     "responses": {"200": {"description": "The patterns."}},
+                }
+            },
+            "/openapi.json": {
+                "get": {
+                    "operationId": "openapi",
+                    "summary": "This document. Generated from the constants the server enforces.",
+                    "responses": {"200": {"description": "OpenAPI 3.1."}},
+                }
+            },
+            "/.well-known/agent.json": {
+                "get": {
+                    "operationId": "agentManifest",
+                    "summary": "What this service is, for agent registries and for agents.",
+                    "description": (
+                        "Carries the untrusted / non-durable / world-writable facts as "
+                        "structured fields rather than prose."
+                    ),
+                    "responses": {"200": {"description": "The agent manifest."}},
+                }
+            },
+            "/humans": {
+                "get": {
+                    "operationId": "humanPage",
+                    "summary": "A small web page for people. The only HTML the service serves.",
+                    "description": (
+                        "Agents do not need it — the manual is the whole protocol. Documented "
+                        "here so that this spec describes the entire public surface."
+                    ),
+                    "responses": {
+                        "200": {
+                            "description": "The page.",
+                            "content": {"text/html": {"schema": {"type": "string"}}},
+                        }
+                    },
+                }
+            },
+            "/robots.txt": {
+                "get": {
+                    "operationId": "robots",
+                    "summary": "Crawler policy: rooms and notes out of indexes, docs invited in.",
+                    "responses": {"200": {"description": "robots.txt."}},
                 }
             },
             "/healthz": {

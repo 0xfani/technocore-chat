@@ -1879,26 +1879,77 @@ def test_stats_serves_the_stored_history_with_the_current_values(stats_client, m
 # ------------------------------------------- machine-readable metadata (registry-facing)
 
 
-def test_openapi_documents_every_route_the_app_actually_serves(client):
-    """The document is what a machine reads instead of the manual, so it has to describe
-    the app that is running — not the app that was running when someone last edited a
-    static file. Both directions: no route missing, no path invented."""
+# The one route deliberately absent from the spec, and why. Anything else that goes
+# missing is a bug, so this set is the entire licence to differ — a new route cannot be
+# waved through without editing this line and saying so.
+UNDOCUMENTED = {
+    # /stats does not exist unless a token is configured, and answers 404 rather than 401
+    # to anyone without it. Publishing its path would hand back exactly what that 404
+    # withholds.
+    "/stats",
+}
+
+
+def _spelled_for_openapi(path: str) -> str:
+    """Starlette writes `{text:path}`; OpenAPI writes `{text}`. Compare on the parameter
+    names, which is what a generated client keys on."""
+    return re.sub(r"\{(\w+)(:\w+)?\}", r"{\1}", path)
+
+
+def test_the_spec_and_the_running_app_describe_the_same_service(client):
+    """The exhaustive version, both directions, paths *and* methods.
+
+    This document is what a machine reads instead of the manual, and a machine cannot
+    notice that a route it was never told about exists. So: every route the app serves is
+    documented, every documented path is one the app would actually route, and every
+    documented method is one that route accepts. A new endpoint fails this test until it is
+    described — which is the point, and is why the check lives here rather than at import:
+    a missing description should fail CI, never refuse to boot a running service.
+    """
+    from starlette.routing import Route
+
     import app as app_module
 
     doc = client.get("/openapi.json").json()
     assert doc["openapi"].startswith("3.1")
-    served = {
-        p
-        for r in app_module.app.routes
-        if (p := getattr(r, "path", "")).startswith(("/r/", "/kv/"))
-    }
-    documented = {p for p in doc["paths"] if p.startswith(("/r/", "/kv/"))}
-    # OpenAPI spells parameters {like_this}; Starlette spells them {like:this}. Compare on
-    # the parameter *names*, which is what a generated client keys on.
-    normalise = lambda p: re.sub(r"\{(\w+)(:path)?\}", r"{\1}", p)  # noqa: E731
-    assert {normalise(p) for p in served} <= documented | {"/r/{room}"}
-    for path in documented:
-        assert path in {normalise(p) for p in served} | {"/r/events", "/rooms"}
+    routes = [r for r in app_module.app.routes if isinstance(r, Route)]
+    assert len(routes) == len(app_module.app.routes), "a non-Route was mounted and skipped here"
+    # Starlette registers one Route per (path, methods) pair, so GET and POST on the same
+    # path are two entries and the methods have to be unioned — keyed rather than merged,
+    # the second entry would hide the first and this whole test would pass on half of it.
+    # `or ()` is for the "accepts anything" route, which this app does not have.
+    served: dict[str, set[str]] = {}
+    for route in routes:
+        served.setdefault(_spelled_for_openapi(route.path), set()).update(
+            m.lower() for m in route.methods or ()
+        )
+
+    # 1. Nothing served is missing.
+    for path, accepts in served.items():
+        if path in UNDOCUMENTED:
+            continue
+        assert path in doc["paths"], f"{path} is served but undocumented"
+        for method in accepts & {"get", "post"}:
+            assert method in doc["paths"][path], f"{method.upper()} {path} is undocumented"
+
+    # 2. Nothing documented is invented. A documented path is legitimate if it is a route's
+    #    own path, or a concrete instance of one — /r/events is a real URL served by the
+    #    /r/{room} route, and worth documenting separately because it behaves differently.
+    for path, operations in doc["paths"].items():
+        matches = [
+            r for r in routes if _spelled_for_openapi(r.path) == path or r.path_regex.match(path)
+        ]
+        assert matches, f"{path} is documented but nothing routes it"
+        accepted = {m for r in matches for m in served[_spelled_for_openapi(r.path)]}
+        assert set(operations) <= accepted, f"{path} documents a method it does not accept"
+
+    # 3. Every operation is actually usable by a reader: identified, summarised, and with
+    #    at least the success case described.
+    operations = [op for path in doc["paths"].values() for op in path.values()]
+    ids = [op["operationId"] for op in operations]
+    assert len(ids) == len(set(ids)), "operationIds must be unique — clients name methods with them"
+    for op in operations:
+        assert op["summary"] and "200" in op["responses"]
 
 
 def test_openapi_limits_are_the_limits_the_server_enforces(client):
