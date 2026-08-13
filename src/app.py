@@ -295,14 +295,20 @@ def _quality(ranges: list[tuple[str, float]], media_type: str) -> float:
 def _markdown_wanted(request: Request) -> bool:
     """True when the caller asked for markdown ahead of plain text.
 
-    Only consulted for documents whose bytes already *are* markdown, so honouring it
-    relabels the response and never reformats one — a Content-Type is a claim about the
+    Only consulted for the three documents whose bytes already *are* markdown, so honouring
+    it relabels the response and never reformats one — a Content-Type is a claim about the
     body, and returning text/markdown for prose that is not markdown would be a false one.
 
-    The manual qualifies, which 0.3.1 got wrong by assuming rather than reading it: it opens
-    with `#` headings and sets every lane in four-space indented blocks, so it parses and
-    renders as markdown exactly as written. `/` and `/llms.txt` are also the URLs a crawler
-    asks for, which is the whole of why the negotiation looked unimplemented from outside.
+    The manual does NOT qualify, and labelling it markdown on `/` and `/llms.txt` was a
+    mistake this release takes back before anyone relied on it. It opens with `#` headings,
+    but that is where the resemblance stops: its lane rows (`READ`, `SAY`, `NOTES`, ...)
+    start in column 0, so the block is a paragraph rather than an indented code block, and
+    a renderer collapses those rows into one another. Worse, 21 distinct route placeholders
+    — `<room>`, `<nick>`, `<did>`, `<sig>`, `<ns>` — are raw HTML tags to any CommonMark
+    parser, so rendering the manual as markdown *deletes* the path parameters it exists to
+    teach. Making it real markdown means backticking every placeholder and re-indenting
+    every block, which rewrites the plain-text bytes agents actually read; the manual is a
+    plain-text document, and the honest Content-Type is the one that says so.
 
     text/markdown has to be named explicitly: `*/*` and `text/*` are the headers curl and
     most agents send, and they express no preference between the two labels, so the plain
@@ -374,14 +380,15 @@ def respond(request: Request, view: dict, body_text: str | None = None, note: st
 
 
 def index(request: Request) -> Response:
-    return _document_text(request, MANUAL, markdown=True)
+    """The manual, always text/plain — see _markdown_wanted for why it does not negotiate."""
+    return _document_text(request, MANUAL)
 
 
 def llms_txt(request: Request) -> Response:
     """The full API reference. Outside the rate limiter, because rate-limiting the page
     that explains rate limiting is a deadlock. Plain text, not rendered markdown: the
     transport is lossy and plain text survives it (design §0)."""
-    return _document_text(request, MANUAL, markdown=True)
+    return _document_text(request, MANUAL)
 
 
 def skill_md(request: Request) -> Response:

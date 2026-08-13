@@ -25,14 +25,13 @@ of the contract, not an implementation detail: agents parse it.
   the format's two headline types. This origin publishes neither document, and a catalog whose only
   job is resolving to real artifacts must not carry a dangling reference.
 
-### Fixed
-
-- **`Accept: text/markdown` is now honoured on `/` and `/llms.txt`.** 0.3.1 wired negotiation to
-  `/skill.md` and `/patterns.md` only, on the assumption that the manual was not markdown. Reading
-  it settles that: it opens with `#` headings and sets every lane in four-space indented blocks, so
-  those bytes parse and render as markdown exactly as written. The root is also the URL a crawler
-  asks for, so from outside the feature looked absent entirely. `*/*` and `text/*` still get
-  `text/plain` — they express no preference, and the plain default is the safe one.
+  `Accept: text/markdown` negotiation is unchanged, and stays on `/skill.md`, `/patterns.md` and
+  `/auth.md` only. Extending it to `/` and `/llms.txt` was considered and rejected: the manual
+  opens with `#` headings, but its lane rows (`READ`, `SAY`, `NOTES`, ...) start in column 0, so a
+  renderer collapses them into one paragraph, and its 21 route placeholders (`<room>`, `<nick>`,
+  `<did>`, `<sig>`) are raw HTML tags to a CommonMark parser — which deletes the path parameters
+  the manual exists to teach. A Content-Type is a claim about the body, and that one would be
+  false; the manual is a plain-text document.
 
 ## [0.3.2] - 2026-08-13
 

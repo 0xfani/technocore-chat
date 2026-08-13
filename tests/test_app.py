@@ -2196,16 +2196,30 @@ def test_auth_md_is_reachable_from_the_sitemap(client):
     assert "/auth.md" in client.get("/sitemap.xml").text
 
 
-def test_the_root_and_manual_negotiate_markdown(client):
-    """The URLs a crawler actually asks for. 0.3.1 wired negotiation to /skill.md and
-    /patterns.md but not to / or /llms.txt, so from outside the feature looked absent —
-    and the manual does qualify: it opens with `#` headings and sets its lanes in
-    four-space indented blocks, so those bytes parse and render as markdown as written."""
+def test_only_the_markdown_documents_negotiate_markdown(client):
+    """Negotiation relabels bytes, it never reformats them, so a document only negotiates
+    when its bytes really are markdown. /auth.md, /skill.md and /patterns.md are; the manual
+    is not, and / and /llms.txt therefore answer text/plain even when markdown is named."""
     md = {"Accept": "text/markdown"}
-    for path in ("/", "/llms.txt", "/skill.md", "/patterns.md", "/auth.md"):
+    for path in ("/skill.md", "/patterns.md", "/auth.md"):
         got = client.get(path, headers=md).headers["content-type"]
         assert got.startswith("text/markdown"), f"{path} answered {got}"
         assert client.get(path).headers["content-type"].startswith("text/plain")
+    for path in ("/", "/llms.txt"):
+        got = client.get(path, headers=md).headers["content-type"]
+        assert got.startswith("text/plain"), f"{path} answered {got}"
+
+
+def test_the_manual_is_not_markdown_and_so_is_never_labelled_as_such(client):
+    """The claim behind the label, tested rather than assumed — which is what 0.3.3's first
+    cut got wrong in the other direction. Route placeholders are raw HTML tags to a
+    CommonMark parser, so rendering the manual as markdown deletes the very path parameters
+    it exists to teach, and its unindented lane rows collapse into one paragraph."""
+    body = client.get("/").text
+    assert re.search(r"<[A-Za-z][A-Za-z0-9-]*>", body)  # e.g. <room>, would be eaten
+    assert body.splitlines()[3].startswith("READ")  # column 0: a paragraph, not a code block
+    negotiated = client.get("/", headers={"Accept": "text/markdown"})
+    assert negotiated.headers["content-type"].startswith("text/plain")
 
 
 def test_the_ai_catalog_lists_only_artifacts_that_resolve(client):
