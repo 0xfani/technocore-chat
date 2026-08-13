@@ -53,10 +53,10 @@ jobs:
         uses: docker/metadata-action@v5
         with:
           images: ghcr.io/${{ github.repository }}
+          # `latest` comes free with a semver tag — adding it explicitly emitted it twice.
           tags: |
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
-            type=raw,value=latest
 
       - id: build
         uses: docker/build-push-action@v6
@@ -72,7 +72,11 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
+      # Attestation needs a public repo or a paid org plan; while the repo is private the
+      # API returns "Feature not available for the flop-labs organization" and would fail an
+      # otherwise-good release. It starts working the moment the repo goes public.
       - uses: actions/attest-build-provenance@v2
+        if: ${{ !github.event.repository.private }}
         with:
           subject-name: ghcr.io/${{ github.repository }}
           subject-digest: ${{ steps.build.outputs.digest }}
