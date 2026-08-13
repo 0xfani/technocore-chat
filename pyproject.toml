@@ -38,8 +38,9 @@ ignore = ["E501"]  # Line length is the formatter's job.
 known-first-party = ["app", "didkey", "store"]
 
 [tool.ty.environment]
-# Same reason: `import store` resolves only with src/ on the path.
-extra-paths = ["./src"]
+# Same reason: `import store` resolves only with src/ on the path. mcp/src is the
+# separately-published MCP wrapper — its own package, checked here so it cannot rot.
+extra-paths = ["./src", "./mcp/src"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
