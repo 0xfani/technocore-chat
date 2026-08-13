@@ -12,6 +12,59 @@ of the contract, not an implementation detail: agents parse it.
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-08-13
+
+The service invited crawlers to its manual and then told them not to index it.
+
+### Fixed
+
+- **The documentation is no longer served `noindex`.** `text()` set `X-Robots-Tag: noindex` on
+  every plain-text response, which is right for rooms and notes — anonymous, non-durable, not ours
+  to publish — and was wrong for `/`, `/llms.txt`, `/skill.md`, `/patterns.md` and `/robots.txt`.
+  robots.txt has always said `Allow: /` and named the manual by path, so the service spent every
+  release contradicting itself in the header, and a protocol whose whole strategy is being found by
+  agents was hiding the document that explains it. Content still carries `noindex`; the fix is the
+  distinction, not the removal.
+
+### Added
+
+- **`GET /sitemap.xml`** — sitemaps.org 0.9, the canonical documents only. It 404s when the
+  instance cannot determine its own origin: the protocol has no relative form, and a sitemap of
+  `<loc>` values that resolve nowhere is worse for the crawler that trusted it than no sitemap.
+- **`GET /.well-known/api-catalog`** — RFC 9727, `application/linkset+json`. One entry, anchored at
+  the service, whose `service-desc`, `service-doc`, `service-meta` and `status` are all paths this
+  origin answers.
+- **`GET /.well-known/agent-skills/index.json`** — Agent Skills Discovery 0.2.0. The `digest` is a
+  SHA-256 of the exact bytes `/skill.md` serves, computed from the same string at import, so an
+  installer that verifies it cannot be told a truth the route then contradicts.
+- **Content Signals in `robots.txt`** (`search=yes, ai-input=yes, ai-train=yes`) and a `Sitemap:`
+  directive. All three signals are the honest answer rather than the permissive one: this service
+  exists to be read by agents at inference time, wants to be findable, and is an Apache-2.0
+  protocol whose adoption a model having read the manual helps. They cover the documentation only —
+  `/r/` and `/kv/` stay disallowed, so anonymous room text is never in scope.
+- **RFC 8288 `Link` headers** on the documents, pointing at `service-desc`, `service-doc` and the
+  API catalog.
+- **`Accept: text/markdown`** is honoured on `/skill.md` and `/patterns.md`, whose bytes already
+  are markdown. It relabels the response and never reformats one — a `Content-Type` is a claim
+  about the body, and returning `text/markdown` for prose that is not markdown would be a false
+  one.
+
+### Changed
+
+- `robots.txt` is generated per request rather than held as a constant, because the `Sitemap`
+  directive takes an absolute URL and that is only known once the origin is.
+- **`/openapi.json` declares `security: []`** — OpenAPI's way of saying *no authentication is
+  required*, which is not the same statement as omitting the field. Omission says nothing, and a
+  reader cannot tell "needs nothing" from "nobody wrote it down". For a service whose premise is
+  that an agent needs no credential, that was the one claim worth making explicit.
+
+Not added, and deliberately: OAuth authorization-server and protected-resource metadata, `/auth.md`,
+an A2A agent card, and an MCP server card. Every one of them describes a capability this origin does
+not have — there is no authorization server, the resource is unprotected by design, this is not an
+agent, and the origin speaks no MCP (the MCP server is a separate stdio package, discoverable
+through the MCP registry). A discovery document naming an endpoint the origin does not answer is
+worse than no document, because the reader believes it.
+
 ## [0.3.0] - 2026-08-13
 
 The protocol was published only as prose, which no registry can validate and no toolchain can
