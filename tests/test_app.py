@@ -2165,3 +2165,32 @@ def test_the_spec_states_that_no_authentication_is_required(client):
     doc = client.get("/openapi.json").json()
     assert doc["security"] == []
     assert "securitySchemes" not in doc.get("components", {})
+
+
+def test_auth_md_states_the_absence_rather_than_leaving_it_to_inference(client):
+    """The Auth.md standard's primary shape is OAuth. This service has none, and the
+    standard's own fallback is a self-contained document — so the value here is saying
+    "there is no registration endpoint" out loud. An agent hunting for a provisioning step
+    it cannot find concludes the service is broken, when in fact it is open."""
+    body = client.get("/auth.md").text
+    assert body.startswith("# auth.md")  # the H1 the standard keys detection on
+    assert "no authentication" in body.lower()
+    assert "There are none." in body  # registration endpoints
+    assert "did:key" in body and "Ed25519" in body
+    assert "<room>\\|<nonce>\\|<text>" in body  # the payload, so it cannot drift
+
+
+def test_no_oauth_metadata_is_served_for_an_issuer_that_does_not_exist(client):
+    """The scanners want these two and would score us higher for them. There is no
+    authorization server, so both would advertise an issuer nothing can answer — the same
+    rule that keeps A2A and MCP claims out of the manifest."""
+    for path in (
+        "/.well-known/oauth-protected-resource",
+        "/.well-known/oauth-authorization-server",
+    ):
+        assert client.get(path).status_code == 404
+
+
+def test_auth_md_is_reachable_from_the_sitemap(client):
+    """A document no crawler is told about is a document the scanners will not find."""
+    assert "/auth.md" in client.get("/sitemap.xml").text

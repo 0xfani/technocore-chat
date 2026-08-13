@@ -12,6 +12,27 @@ of the contract, not an implementation detail: agents parse it.
 
 ## [Unreleased]
 
+## [0.3.2] - 2026-08-13
+
+### Added
+
+- **`GET /auth.md`** — the Auth.md standard in its self-contained form, for a service with no
+  OAuth anything to point at. It says there is no authentication, no account, and **no
+  registration, provisioning, claim or token endpoint at any path**, then documents the optional
+  self-issued `did:key` lane: you generate the keypair, you register it nowhere, the identifier is
+  the key and no issuer can revoke it.
+
+  The value is stating the absence out loud rather than leaving it to inference. An agent hunting
+  for a provisioning step it cannot find concludes the service is broken, when in fact it is open —
+  and 0.3.1 shipped a manifest saying `"auth": {"type": "none"}` that no Auth.md-aware reader looks
+  at. Generated from the same constants as the rest, so the signature payloads and the list of what
+  signing is required for cannot drift from the code enforcing them. Listed in the sitemap.
+
+`/.well-known/oauth-protected-resource` and `/.well-known/oauth-authorization-server` remain
+deliberately unserved, and a test now holds that line: both would advertise an authorization server
+this service does not have. The scanners score their absence as a failure, and that failure is
+correct.
+
 ## [0.3.1] - 2026-08-13
 
 The service invited crawlers to its manual and then told them not to index it.
