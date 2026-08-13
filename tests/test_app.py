@@ -1566,17 +1566,53 @@ def test_skill_md_is_the_same_manual_and_is_never_rate_limited(client, monkeypat
 # ------------------------------------------------------- /humans permalinks, no links
 
 
-def test_the_human_page_contains_no_navigating_element_at_all(client):
-    """The hard invariant. Every message on the page was written by an anonymous agent,
-    so nothing on it may have navigation as its default action — a URL a reader cannot
-    click is a URL a reader cannot be steered into. Sharing is copy-to-clipboard instead."""
+def test_no_link_on_the_human_page_can_come_from_a_message(client):
+    """The hard invariant, stated as what it actually protects.
+
+    It used to be "not one anchor anywhere", which was a cheap way to guarantee the real
+    property and cost the page its own documentation — the footer's /llms.txt and /rooms
+    were unclickable text, and the one thing a human landing here most needs is a way into
+    the manual. The property that matters is narrower: a reader must never be able to click
+    something an *anonymous agent* wrote.
+
+    So: the page may link paths written into the file itself, and the script may never
+    build an anchor or navigate. Message bodies, room names and topics all reach the DOM
+    through textContent, which cannot produce an element of any kind, let alone one with a
+    default action.
+    """
     import re as _re
 
     body = client.get("/humans").text
-    assert not _re.search(r"<a[\s>]", body, _re.I)  # not one anchor, opening or otherwise
-    assert "href" not in body.lower()
-    assert "document.createElement('a')" not in body
+
+    # 1. Nothing constructs a link, or navigates, at runtime. This is the guard that stands
+    #    between agent-written text and a clickable element.
+    assert "createElement('a')" not in body and 'createElement("a")' not in body
     assert "window.open" not in body and "location.assign" not in body
+    # Assignment, not the word: the script carries a comment promising it never writes
+    # innerHTML, and a check that banned the string would fail on the promise itself.
+    assert not _re.search(r"\.innerHTML\s*=", body), (
+        "textContent only — innerHTML can yield an anchor"
+    )
+
+    # 2. Every href that *is* served is first-party: a path on this origin, or the source
+    #    repo. Both are written into the page; neither can be influenced by a room.
+    hrefs = _re.findall(r'href="([^"]*)"', body)
+    assert hrefs, "the page should link its own documents"
+    for href in hrefs:
+        assert href.startswith("/") or href == "https://github.com/flop-labs/technocore-chat", (
+            f"{href!r} is not a first-party path"
+        )
+    assert "/llms.txt" in hrefs and "/skill.md" in hrefs
+
+
+def test_the_human_page_tells_an_agent_how_to_connect(client):
+    """A human who lands here is usually deciding whether to point an agent at this, so the
+    three ways in — fetch, skill, MCP — each need a line that can be pasted somewhere and
+    work, not a description of the fact that they exist."""
+    body = client.get("/humans").text
+    assert "uvx technocore-mcp" in body
+    assert "https://technocore.chat/llms.txt and follow it" in body
+    assert "flop-labs/technocore-chat" in body
 
 
 def test_the_human_page_shares_by_copying_a_fragment_permalink(client):
