@@ -281,6 +281,62 @@ def test_no_forwarded_header_is_trusted_by_default(client, monkeypatch):
     assert ("203.0.113.9", "read") in app_module._buckets
 
 
+def _dockerfile_cmd() -> list[str]:
+    """The argv the shipped image actually runs, out of the CMD JSON array."""
+    raw = (Path(__file__).resolve().parents[1] / "docker" / "Dockerfile").read_text()
+    body = raw.split("\nCMD ", 1)[1].replace("\\\n", " ")
+    return json.loads(body[: body.index("]") + 1])
+
+
+def test_shipped_image_does_not_let_uvicorn_rewrite_the_client_address():
+    """The test above proves the *app* trusts no forwarded header — but it runs through
+    TestClient, which never touches uvicorn, so it stayed green while the image shipped
+    `--proxy-headers --forwarded-allow-ips "*"`. That combination makes uvicorn overwrite
+    scope["client"] from X-Forwarded-For for ANY peer, and client_ip() falls back to exactly
+    that value: the rate limiter, the write budget and the long-poll caps all keyed on a
+    number the caller chose. The guarantee lives below the app, so it is asserted below the
+    app — against the argv the image runs and against uvicorn's own middleware.
+    """
+    cmd = _dockerfile_cmd()
+    assert "--no-proxy-headers" in cmd
+    assert "--proxy-headers" not in cmd
+    # `--forwarded-allow-ips` is meaningless without proxy headers and is the flag that made
+    # this dangerous; nothing should reintroduce it without revisiting the reasoning above.
+    assert "--forwarded-allow-ips" not in cmd
+
+
+def test_trusting_every_peer_would_hand_the_caller_its_own_rate_limit_identity():
+    """What the flag above buys, demonstrated rather than asserted from memory: the same
+    remote peer, the same header, the two trust settings. Pinning the failure mode means a
+    future uvicorn that changes this behaviour is caught here rather than in production."""
+    import asyncio
+    from typing import Any, cast
+
+    from uvicorn.middleware.proxy_headers import ProxyHeadersMiddleware
+
+    seen: dict[str, tuple] = {}
+
+    async def sink(scope, receive, send):
+        seen["client"] = scope["client"]
+
+    def client_seen_by_app(trusted: str) -> str:
+        scope = {
+            "type": "http",
+            "client": ("203.0.113.9", 54321),  # an ordinary caller, not a proxy
+            "scheme": "http",
+            "headers": [(b"x-forwarded-for", b"1.2.3.4"), (b"host", b"x")],
+        }
+        # A hand-built scope and no receive/send: this probes the middleware's rewrite step,
+        # which reads `client` and `headers` and forwards the rest untouched to `sink`. Cast
+        # because the real signature wants full ASGI callables that nothing here calls.
+        mw = cast(Any, ProxyHeadersMiddleware(sink, trusted_hosts=trusted))
+        asyncio.run(mw(scope, None, None))
+        return seen["client"][0]
+
+    assert client_seen_by_app("*") == "1.2.3.4"  # what the image used to do
+    assert client_seen_by_app("127.0.0.1") == "203.0.113.9"  # real peer survives
+
+
 def test_idle_rooms_are_reaped_so_squatting_expires(tmp_path, monkeypatch):
     import store
 

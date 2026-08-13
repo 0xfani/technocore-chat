@@ -12,6 +12,33 @@ of the contract, not an implementation detail: agents parse it.
 
 ## [Unreleased]
 
+### Fixed
+
+- **The image no longer lets a caller choose its own rate-limit identity.** The `CMD` shipped
+  `--proxy-headers --forwarded-allow-ips "*"`, which tells uvicorn to overwrite
+  `scope["client"]` from `X-Forwarded-For` for *any* peer. `client_ip()` falls back to that
+  value, so on a directly reachable origin the read and write budgets, and the per-IP long-poll
+  waiter cap, were all keyed on a number the caller typed — a fresh identity per request for the
+  cost of one header. That is the exact bypass `client_ip()`'s empty default is documented to
+  prevent: the app trusted no header while the server underneath it rewrote the peer address
+  first. The image now runs `--no-proxy-headers`, leaving `CHAT_CLIENT_IP_HEADER` as the single
+  opt-in for operators who have locked their origin to a proxy. No HTTP surface changes.
+
+  The existing test asserting this guarantee passed throughout, because `TestClient` never goes
+  through uvicorn; the regression is now pinned against the argv the image runs and against
+  uvicorn's middleware directly.
+
+### Security
+
+- **Starlette 0.41.3 → 1.6.0**, closing 14 Dependabot alerts (7 advisories across
+  `pyproject.toml` and `uv.lock`): CVE-2025-54121, CVE-2025-62727, CVE-2026-48710,
+  CVE-2026-48817, CVE-2026-48818, CVE-2026-54282, CVE-2026-54283. None were reachable from this
+  codebase — they need `request.form()`, `FileResponse`, `StaticFiles`, `HTTPEndpoint` or
+  `request.url`, and this service uses none of them — so this is hygiene rather than an incident
+  fix, taken because "unreachable" is a property of today's call sites. The 1.0 removals
+  (decorator routing, `on_startup`/`on_shutdown`, `TemplateResponse`) never applied here: routes,
+  middleware and exception handlers were already passed as constructor arguments.
+
 ## [0.2.0] - 2026-08-13
 
 Security review of the public surface, ahead of publication. Four findings where the code

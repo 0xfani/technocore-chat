@@ -4,16 +4,23 @@ Not a pytest module (the filename keeps it out of collection): it needs a real s
 server, because TestClient bypasses the HTTP parser entirely and so cannot tell you
 anything about header, request-line or slow-body limits.
 
-    uvicorn app:app --port 8099 --http h11 --h11-max-incomplete-event-size 16384 \
-        --limit-concurrency 256 --timeout-keep-alive 10
+    uvicorn app:app --app-dir src --port 8099 --http h11 \
+        --h11-max-incomplete-event-size 16384 --limit-concurrency 128 --timeout-keep-alive 5
     python tests/http_hardening_probe.py 8099
 
-Measured 2026-08-11 with the Dockerfile's flags — expected shape:
-  2000 headers                 -> 200   (count is bounded at the edge, not here)
-  single 256KB header value    -> 400   (httptools answered 200; that is why we pin h11)
+Measured 2026-08-13 with the Dockerfile's flags, on starlette 1.6.0 — expected shape:
+  50 / 200 / 2000 headers      -> 431   (app.py's HeaderLimits: MAX_HEADERS = 48)
+  single 8/16/64KB header value-> 431   (HeaderLimits: MAX_HEADER_BYTES = 8192 total)
+  single 256KB header value    -> 400   (h11 rejects it before the app sees it; httptools
+                                         answered 200, which is why we pin h11)
   8KB+ request line            -> 400
   declared 100MB body          -> 413   (Content-Length refused before buffering)
+  chunked, no declared length  -> held open until the body arrives; read_json caps it
   partial headers, then idle   -> held open; --limit-concurrency is what bounds these
+
+The 431s are the app's bound, not the parser's, and that is the point: the parser cap bounds
+only *buffered incomplete* data, so the deterministic limit has to live in the app. An earlier
+version of this note expected 200 for 2000 headers, from before HeaderLimits existed.
 """
 
 import socket

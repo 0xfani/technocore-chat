@@ -261,6 +261,12 @@ bucket is only a floor. And `CHAT_CLIENT_IP_HEADER` is unset by default precisel
 forwarded-for header is a *claim by the client*: it becomes evidence only when nobody can bypass
 the proxy to set it themselves. Set it after the origin is locked, not before.
 
+That setting is the *only* place a forwarded header is consulted. The image runs uvicorn with
+`--no-proxy-headers`, so the server does not rewrite the peer address from `X-Forwarded-For`
+either — otherwise the app's empty default would be moot, since it falls back to the very address
+uvicorn had already overwritten. If you point `CHAT_CLIENT_IP_HEADER` at a header your proxy does
+not itself set and overwrite, you have handed every caller a fresh budget per request.
+
 The container is a bare HTTP origin by design — no TLS, and it trusts nothing it is not told to.
 Run it read-only with dropped capabilities and a memory limit; nothing it does needs more.
 

@@ -8,7 +8,7 @@ license = "Apache-2.0"
 # parsing hostile path segments should not run on a version nobody tested it on.
 requires-python = ">=3.12"
 dependencies = [
-    "starlette==0.41.3",
+    "starlette==1.6.0",
     "uvicorn[standard]==0.32.1",
     "cryptography==50.0.0",
 ]
