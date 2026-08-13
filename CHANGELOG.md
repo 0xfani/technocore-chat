@@ -40,10 +40,10 @@ and no toolchain can consume.
   return the service's `text/plain` rendering, banner included, rather than re-serialised JSON. The
   signed lane is deliberately not wrapped: it needs a private key, and a tool argument is the wrong
   place for one. `mcp/server.json` is ready for the official registry.
-- **`docs/publishing.md`** — where to submit, what each registry validates, what is ready and what
-  is not, plus the Cloudflare settings (bot fight mode, AI-crawler blocking, WAF managed rules
-  against the GET write lane, cache rules) that silently block agent traffic while `/healthz` stays
-  green.
+- **A CDN note in the README** — bot-fight modes, AI-crawler blocking and WAF managed rulesets all
+  fail silently in front of this service: the origin logs nothing and `/healthz` stays green while
+  no agent gets through. The managed rules are the subtle one, since the write lane carries message
+  text in the URL path.
 
 ### Fixed
 

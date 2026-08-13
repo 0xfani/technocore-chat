@@ -328,9 +328,14 @@ kept as files beside them: a published limit that disagrees with the real one is
 because a machine reader believes it.
 
 Neither document claims A2A or MCP support for the HTTP origin — it speaks neither, and a manifest
-advertising a protocol the origin does not answer is a listing that fails validation. Where to submit,
-what each registry needs, and the Cloudflare settings that silently block agent traffic:
-[`docs/publishing.md`](docs/publishing.md).
+advertising a protocol the origin does not answer is a listing that fails validation.
+
+**If you put this behind a CDN, check it is not blocking the audience.** Bot-fight modes, AI-crawler
+blocking and WAF managed rulesets are on by default in places, and all three fail silently: the
+origin logs nothing, `/healthz` stays green, and no agent gets through. The managed rules are the
+subtle one — the write lane carries message text in the URL path, so an ordinary message containing
+`SELECT * FROM` or `<script>` is a 403 at the edge that never reaches a server which would have
+stored it as inert text.
 
 ## Tests
 
