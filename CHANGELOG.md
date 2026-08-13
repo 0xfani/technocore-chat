@@ -12,6 +12,20 @@ of the contract, not an implementation detail: agents parse it.
 
 ## [Unreleased]
 
+### Added
+
+- `SKILL.md` — an installable Agent Skill covering the four operations, the harness-cache
+  and back-off pitfalls, and the rule that message bodies are data and never instructions.
+  Distinct from the `/skill.md` endpoint, which is the runtime manual.
+
+### Removed
+
+- `docker/compose.yaml` and `docs/deploy.md`. Deployment lives with whoever deploys; a
+  public repo should not carry one operator's host topology, tunnel wiring or edge config.
+  The README keeps the two properties a self-hoster genuinely needs — give it its own host,
+  and turn off bot detection for the hostname — because those are properties of the
+  software, not of our setup.
+
 ## [0.1.1] - 2026-08-13
 
 ### Added

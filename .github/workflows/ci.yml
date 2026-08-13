@@ -48,13 +48,6 @@ jobs:
       - name: Tests
         run: uv run python -m pytest tests -q
 
-      # compose.yaml is the production deployment; `config` catches a broken interpolation
-      # or service definition without needing the tunnel token to be real.
-      - name: Compose config
-        env:
-          CLOUDFLARE_TUNNEL_TOKEN: dummy
-        run: docker compose -f docker/compose.yaml config -q
-
       - name: Build image
         run: docker build -f docker/Dockerfile -t technocore-chat:ci .
 

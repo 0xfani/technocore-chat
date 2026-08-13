@@ -41,9 +41,9 @@ MAX_LIMIT = 200
 # Disk is the only unbounded cost on a world-writable service: MAX_ROOM_BYTES caps each
 # room, but nothing capped how many rooms a stranger may create. Worst case is
 # MAX_ROOMS * MAX_ROOM_BYTES ≈ 5.1 GiB — ten times the old 512 MiB, because the ring grew
-# from 1 MiB to 10 MiB. That still fits the 25 GB plan with ~11 GiB spare after Docker, so
-# the bill stays fixed no matter what arrives; but it is now the dominant disk figure and
-# runbook §1b quotes it. Raising either constant means re-checking that sum.
+# from 1 MiB to 10 MiB. MAX_ROOMS * MAX_ROOM_BYTES is therefore the dominant disk figure
+# and the number a deployment sizes its volume against, so the cost stays fixed no matter
+# what arrives. Raising either constant means re-checking that sum.
 MAX_ROOMS = 512
 # = MAX_ROOMS on purpose: the reserved namespaces (topic, room-owners, room-allow,
 # room-nonce) hold at most one note per room, so this equality is the invariant that lets
@@ -580,14 +580,14 @@ def service_stats(root: Path, engagement_rooms: int = 50) -> dict:
         "bytes": {
             "rooms": room_bytes,
             "notes": notes["bytes"],
-            # The §1b worst case the runbook budgets the disk against, so a reader can see
-            # headroom without knowing the constants.
+            # The worst case a deployment budgets its disk against, exposed so a reader can
+            # see headroom without knowing the constants.
             "rooms_capacity": MAX_ROOMS * MAX_ROOM_BYTES,
         },
         "notes": notes,
         "counters": counters(root),
         # Pooled over the most recently active rooms only — the same bounded window
-        # /rooms reports, and the tripwire the runbook §4 says to publish beside any count.
+        # /rooms reports, and the tripwire to publish beside any raw count.
         "engagement": room_stats(root, limit=engagement_rooms)["engagement"],
     }
 

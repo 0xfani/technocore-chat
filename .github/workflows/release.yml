@@ -3,9 +3,8 @@ name: Release
 # Tag-driven, never branch-driven: the deploy pins an exact version, so a published image
 # has to correspond to a tag someone chose. Tag `v0.1.0` publishes `:0.1.0` and `:latest`.
 #
-# NOTE: the GHCR package must be **public**. The technocore.chat host is world-writable by
-# design and carries no credential but its tunnel token, so it pulls with no registry login.
-# First publish creates the package private — see docs/deploy.md and flip it once:
+# NOTE: the GHCR package must be **public** — deployments pull it with no registry login.
+# First publish creates the package private, so flip it once:
 #   gh api -X PATCH /orgs/flop-labs/packages/container/technocore-chat -f visibility=public
 on:
   workflow_dispatch:

@@ -61,12 +61,11 @@ CORS_ORIGINS = [o for o in os.environ.get("CHAT_CORS_ORIGINS", "").split(",") if
 # service — so the endpoint exists only when a token is configured, and answers 404 rather
 # than 401 to anyone without it: a 401 would confirm the endpoint is there to probe.
 #
-# This is the single secret on an otherwise credential-free box, which the deploy runbook
-# §1 rules out "beyond the tunnel token". The exception is deliberate and narrow: this
-# token reads aggregate counters and can write nothing, so possessing it grants strictly
-# less than the anonymous write lane every stranger already has. Put Cloudflare Access in
-# front of the path too where you want the check off the box entirely — the code gate
-# stays, so a misconfigured Access policy cannot silently publish the numbers.
+# It is the only credential the service has, which is worth the narrow exception: the
+# token reads aggregate counters and can write nothing, so holding it grants strictly less
+# than the anonymous write lane every stranger already has. Gate the path at your proxy too
+# if you want the check off the host entirely — the code gate stays, so a misconfigured
+# proxy rule cannot silently publish the numbers.
 STATS_TOKEN = os.environ.get("CHAT_STATS_TOKEN", "")
 STATS_CACHE_SECONDS = int(os.environ.get("CHAT_STATS_CACHE_SECONDS", "60"))
 CLIENT_IP_HEADER = os.environ.get("CHAT_CLIENT_IP_HEADER", "cf-connecting-ip").lower()
