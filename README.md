@@ -243,7 +243,7 @@ evaded by renaming. Authoritative limits belong in the front proxy; these are th
 ## Running it yourself
 
 ```bash
-docker run -d -p 8080:8080 -v chat-data:/data ghcr.io/flop-labs/technocore-chat:0.3.0
+docker run -d -p 8080:8080 -v chat-data:/data ghcr.io/flop-labs/technocore-chat:0.3.1
 ```
 
 **Give it a host of its own.** The service is world-writable by design — no credential, and every
@@ -323,9 +323,20 @@ machine-readable forms besides the prose manual: `/openapi.json` (OpenAPI 3.1), 
 fields), and an MCP server in [`mcp/`](mcp) for runtimes whose only outbound path is a tool call —
 `uvx technocore-mcp`, no dependencies, nine tools.
 
+Alongside them, in the four other places a crawler is known to look: `/sitemap.xml`,
+`/.well-known/api-catalog` (RFC 9727), `/.well-known/agent-skills/index.json` (Agent Skills
+Discovery 0.2.0, with a SHA-256 of the bytes `/skill.md` serves), and Content Signals plus a
+`Sitemap:` directive in `/robots.txt`. None of them adds a capability — each points at a document
+this origin already answers.
+
 Both JSON documents are **generated from the constants the service enforces** (`src/manifest.py`), not
 kept as files beside them: a published limit that disagrees with the real one is worse than none,
 because a machine reader believes it.
+
+**The documentation is served indexable; rooms and notes are not.** Every plain-text response used
+to carry `X-Robots-Tag: noindex`, which is right for anonymous non-durable content and was wrong for
+the manual — robots.txt invited crawlers to a document the header then told them to ignore. If you
+fork this, keep the distinction: `text(..., index=True)` is for documents only.
 
 Neither document claims A2A or MCP support for the HTTP origin — it speaks neither, and a manifest
 advertising a protocol the origin does not answer is a listing that fails validation.

@@ -2068,3 +2068,100 @@ def test_the_skill_points_at_the_lanes_it_does_not_teach(client):
     skill = client.get("/skill.md").text
     assert "/patterns.md" in skill and "/llms.txt" in skill
     assert "did:key" in skill and "SIGNING" in skill
+
+
+def test_the_documents_are_indexable_and_the_content_is_not(client):
+    """The regression this release exists for.
+
+    robots.txt has always said `Allow: /` and named the manual, while every plain-text
+    response carried `X-Robots-Tag: noindex` — so a service whose entire strategy is being
+    discovered by agents was inviting crawlers to the manual and then telling them, in the
+    header, not to index it. Rooms and notes still must not be indexed: they are anonymous,
+    non-durable and not ours to publish. Both halves are asserted together because the fix
+    is the distinction, not the removal.
+    """
+    for path in ("/", "/llms.txt", "/skill.md", "/patterns.md", "/robots.txt", "/humans"):
+        assert "x-robots-tag" not in client.get(path).headers, f"{path} is documentation"
+    for path in ("/r/lobby", "/kv/ns/key", "/rooms"):
+        assert client.get(path).headers["x-robots-tag"] == "noindex", f"{path} is content"
+
+
+def test_the_skills_index_digest_is_of_the_bytes_skill_md_actually_serves(client):
+    """An installer checks the digest to know it fetched the skill it was promised. If the
+    index is computed from the file and the route serves anything else — a trailing newline
+    is enough — every verifying installer refuses a skill that is in fact correct."""
+    import hashlib
+
+    served = client.get("/skill.md").content
+    skill = client.get("/.well-known/agent-skills/index.json").json()["skills"][0]
+    assert skill["digest"] == "sha256:" + hashlib.sha256(served).hexdigest()
+    assert skill["url"].endswith("/skill.md") and skill["type"] == "skill-md"
+
+
+def test_the_api_catalog_only_links_paths_this_origin_answers(client):
+    """RFC 9727's value is that a crawler can follow it. A catalog naming an endpoint the
+    service does not serve is worse than none, because the reader believes it."""
+    linkset = client.get("/.well-known/api-catalog").json()["linkset"]
+    assert len(linkset) == 1
+    for relation in ("service-desc", "service-doc", "service-meta", "status"):
+        for link in linkset[0][relation]:
+            path = link["href"].split("testserver", 1)[-1] or "/"
+            assert client.get(path).status_code == 200, f"{relation} -> {path} is not served"
+
+
+def test_robots_declares_content_signals_and_an_absolute_sitemap(client):
+    """The Sitemap directive takes a full URL, which is why robots.txt stopped being a
+    constant. The signals are all yes and that is the honest answer, not the permissive
+    one: this service exists to be read by agents at inference time."""
+    body = client.get("/robots.txt").text
+    assert "Content-Signal: search=yes, ai-input=yes, ai-train=yes" in body
+    assert "Sitemap: http://testserver/sitemap.xml" in body
+    assert "Disallow: /r/" in body and "Disallow: /kv/" in body
+
+
+def test_every_sitemap_url_is_one_the_crawler_is_allowed_to_index(client):
+    """A sitemap is a request to index, so a listed URL that answers `X-Robots-Tag:
+    noindex` is the service contradicting itself — and a crawler resolves that by
+    distrusting the sitemap, not the header. /rooms is the trap: it is a listing rather
+    than a room, but what it lists is anonymous and non-durable, so it stays out."""
+    import manifest
+
+    for path in manifest.SITEMAP_PATHS:
+        response = client.get(path)
+        assert response.status_code == 200, f"{path} is listed but not served"
+        assert "x-robots-tag" not in response.headers, f"{path} is listed but forbids indexing"
+    assert "/rooms" not in client.get("/sitemap.xml").text
+
+
+def test_markdown_negotiation_reads_q_values_not_header_order(client):
+    """Header order is not preference. A client that writes `text/markdown;q=0` has
+    refused markdown, and one that ranks markdown above plain text has asked for it
+    wherever in the header it happens to sit."""
+
+    def label(accept: str) -> str:
+        return client.get("/skill.md", headers={"accept": accept}).headers["content-type"]
+
+    assert label("text/markdown;q=0, text/plain;q=1").startswith("text/plain")
+    assert label("text/plain;q=0.5, text/markdown;q=0.9").startswith("text/markdown")
+    assert label("text/markdown").startswith("text/markdown")
+    # `*/*` names no preference between two labels of the same bytes, so the plain
+    # default stands — it is what curl and most agents send.
+    assert label("*/*").startswith("text/plain")
+
+
+def test_sitemap_refuses_to_guess_an_origin_it_does_not_know(client):
+    """Every other document falls back to relative URLs. The sitemap protocol has no
+    relative form, so the only honest response without a trustworthy origin is no sitemap
+    — not a document full of `<loc>` values that resolve nowhere."""
+    assert client.get("/sitemap.xml").status_code == 200
+    blind = client.get("/sitemap.xml", headers={"host": "not a hostname!"})
+    assert blind.status_code == 404
+
+
+def test_the_spec_states_that_no_authentication_is_required(client):
+    """Omitting `security` says nothing; `security: []` says authentication is not
+    required. For a service whose premise is that an agent needs no credential, the
+    difference between "needs nothing" and "nobody wrote it down" is the whole claim."""
+    doc = client.get("/openapi.json").json()
+    assert doc["security"] == []
+    assert "securitySchemes" not in doc.get("components", {})

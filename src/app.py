@@ -11,6 +11,7 @@ Not part of the FLOP protocol. Satellite service, ephemeral by design.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import os
 import re
@@ -83,13 +84,10 @@ CLIENT_IP_HEADER = os.environ.get("CHAT_CLIENT_IP_HEADER", "").strip().lower()
 # fixed string no matter who asks.
 PUBLIC_URL = os.environ.get("CHAT_PUBLIC_URL", "").strip()
 
-# Agents are the intended audience, so say so where crawlers look. Cloudflare serves a
-# Content Signals Policy (or a managed AI-blocking robots.txt) for zones that ship none.
-ROBOTS = (
-    "User-agent: *\nAllow: /\nDisallow: /r/\nDisallow: /kv/\n\n"
-    "# Manual: /llms.txt\n# Worked examples: /patterns.md\n"
-    "# Machine-readable: /openapi.json, /.well-known/agent.json\n"
-)
+# robots.txt moved to manifest.robots_txt(base): the Sitemap directive takes an absolute
+# URL, so the document depends on the origin and can no longer be a constant. Agents are
+# the intended audience, so it says so where crawlers look — Cloudflare serves a Content
+# Signals Policy (or a managed AI-blocking robots.txt) for zones that ship none.
 
 # A nonce is a plain counter (a millisecond clock works): the signed URL for a given key
 # and room must count up, which is what makes a captured URL single-use. 19 digits is the
@@ -117,6 +115,10 @@ VERSION = tomllib.loads(_asset("pyproject.toml"))["project"]["version"]
 # The same bytes as the SKILL.md an agent can install: one artifact, fetched at runtime by
 # agents that have no skills mechanism and installed by the ones that do.
 SKILL = _asset("SKILL.md")
+# Published in /.well-known/agent-skills/index.json. Computed from the bytes /skill.md
+# serves rather than by reading the file again: an installer checks the digest to know it
+# fetched the skill it was promised, so the only correct source is the served string.
+SKILL_DIGEST = "sha256:" + hashlib.sha256(SKILL.encode("utf-8")).hexdigest()
 
 BANNER = (
     "!! UNTRUSTED CONTENT — the lines below were written by other agents or by "
@@ -231,16 +233,90 @@ def _cursor[D: (int, None)](value: str | None, default: D) -> int | D:
     return n if n >= 0 else default
 
 
-def text(body: str, status: int = 200) -> Response:
+def text(
+    body: str, status: int = 200, *, index: bool = False, media_type: str = "text/plain"
+) -> Response:
+    """Plain text, `noindex` by default.
+
+    The default is right for the overwhelming majority of responses, which are room and
+    note content: anonymous, non-durable and not ours to put in an index. It was wrong for
+    the handful of responses that are the documentation, and silently so — robots.txt has
+    always said `Allow: /` and named the manual, while this header told every crawler that
+    reached it not to index the thing robots.txt had just advertised. A service whose whole
+    premise is being discoverable was hiding its own manual. Documents pass index=True.
+    """
+    headers = {
+        "Cache-Control": "no-store",
+        "X-Content-Type-Options": "nosniff",
+    }
+    if not index:
+        headers["X-Robots-Tag"] = "noindex"
     return PlainTextResponse(
         body if body.endswith("\n") else body + "\n",
         status_code=status,
-        headers={
-            "Cache-Control": "no-store",
-            "X-Content-Type-Options": "nosniff",
-            "X-Robots-Tag": "noindex",
-        },
+        media_type=media_type,
+        headers=headers,
     )
+
+
+def _accept_ranges(accept: str) -> list[tuple[str, float]]:
+    """The Accept header as (media range, q) pairs, lowercased.
+
+    Header order is not preference — q is (RFC 9110 §12.5.1) — so the ranges have to be
+    parsed rather than searched for as substrings. An unparseable q is treated as 0: a
+    client that wrote something we cannot read has not said the type is acceptable.
+    """
+    ranges: list[tuple[str, float]] = []
+    for part in accept.lower().split(","):
+        name, _, params = part.strip().partition(";")
+        q = 1.0
+        for param in params.split(";"):
+            key, _, value = param.partition("=")
+            if key.strip() == "q":
+                try:
+                    q = float(value.strip())
+                except ValueError:
+                    q = 0.0
+        if name.strip():
+            ranges.append((name.strip(), q))
+    return ranges
+
+
+def _quality(ranges: list[tuple[str, float]], media_type: str) -> float:
+    """The q of the most specific range matching `media_type`; 0 when nothing matches."""
+    kind, _, _ = media_type.partition("/")
+    for candidate in (media_type, f"{kind}/*", "*/*"):
+        for name, q in ranges:
+            if name == candidate:
+                return q
+    return 0.0
+
+
+def _markdown_wanted(request: Request) -> bool:
+    """True when the caller asked for markdown ahead of plain text.
+
+    Only consulted for the three documents whose bytes already *are* markdown, so honouring
+    it relabels the response and never reformats one — a Content-Type is a claim about the
+    body, and returning text/markdown for prose that is not markdown would be a false one.
+
+    text/markdown has to be named explicitly: `*/*` and `text/*` are the headers curl and
+    most agents send, and they express no preference between the two labels, so the plain
+    default stands. Once it is named, q decides — `text/markdown;q=0` is a refusal, and a
+    markdown range listed after a lower-q plain one still wins.
+    """
+    ranges = _accept_ranges(request.headers.get("accept", ""))
+    if not any(name == "text/markdown" for name, _ in ranges):
+        return False
+    markdown = _quality(ranges, "text/markdown")
+    return markdown > 0 and markdown >= _quality(ranges, "text/plain")
+
+
+def _document_text(request: Request, body: str, *, markdown: bool = False) -> Response:
+    """A public document: indexable, and carrying the RFC 8288 pointers to the rest."""
+    media = "text/markdown" if markdown and _markdown_wanted(request) else "text/plain"
+    response = text(body, index=True, media_type=media)
+    response.headers["Link"] = manifest.link_header(_base_url(request))
+    return response
 
 
 def who(name: str) -> str:
@@ -293,14 +369,14 @@ def respond(request: Request, view: dict, body_text: str | None = None, note: st
 
 
 def index(request: Request) -> Response:
-    return text(MANUAL)
+    return _document_text(request, MANUAL)
 
 
 def llms_txt(request: Request) -> Response:
     """The full API reference. Outside the rate limiter, because rate-limiting the page
     that explains rate limiting is a deadlock. Plain text, not rendered markdown: the
     transport is lossy and plain text survives it (design §0)."""
-    return text(MANUAL)
+    return _document_text(request, MANUAL)
 
 
 def skill_md(request: Request) -> Response:
@@ -308,15 +384,20 @@ def skill_md(request: Request) -> Response:
     whole onboarding instruction — and so the installable skill and the fetched one can
     never drift apart. Shorter than the manual on purpose: it teaches the four operations
     and the pitfalls, and points at /llms.txt for the full surface. Unlimited, same as the
-    manual."""
-    return text(SKILL)
+    manual.
+
+    Byte-for-byte matters twice now: /.well-known/agent-skills/index.json publishes a
+    digest of these bytes, and a skill whose digest does not match what it serves is a
+    skill an installer is right to refuse.
+    """
+    return _document_text(request, SKILL, markdown=True)
 
 
 def patterns(request: Request) -> Response:
     """Worked examples (E2E choreography, mailboxes, key passing) live in their own file
     so the manual stays one clean fetch; the manual points here. Unlimited for the same
     reason the manual is: documentation an agent may need while throttled."""
-    return text(PATTERNS)
+    return _document_text(request, PATTERNS, markdown=True)
 
 
 def _base_url(request: Request) -> str:
@@ -349,6 +430,40 @@ def agent_json(request: Request) -> Response:
     facts as structured fields, because a machine reader should not have to infer them
     from prose. Unlimited, same as the manual."""
     return _document(manifest.agent_manifest(_base_url(request), VERSION, RATE_READ, RATE_WRITE))
+
+
+def api_catalog(request: Request) -> Response:
+    """`/.well-known/api-catalog` — RFC 9727. One API, so one linkset entry, and every
+    link in it is a path this origin actually answers."""
+    response = _document(manifest.api_catalog_document(_base_url(request)))
+    response.headers["Content-Type"] = "application/linkset+json"
+    return response
+
+
+def agent_skills(request: Request) -> Response:
+    """`/.well-known/agent-skills/index.json` — Agent Skills Discovery 0.2.0.
+
+    The digest is of the bytes /skill.md serves, computed at import from the same string,
+    so the two cannot disagree without the process restarting on a different file.
+    """
+    return _document(manifest.agent_skills_index(_base_url(request), SKILL_DIGEST))
+
+
+def sitemap(request: Request) -> Response:
+    """`/sitemap.xml` — sitemaps.org 0.9.
+
+    404 when the origin is not known: the protocol has no relative form, and a sitemap of
+    unresolvable `<loc>` values is worse for the crawler that trusted it than no sitemap.
+    Set CHAT_PUBLIC_URL, or send a Host header that looks like a hostname.
+    """
+    base = _base_url(request)
+    if not base:
+        return text("404 no sitemap: this instance does not know its own origin", status=404)
+    return Response(
+        manifest.sitemap_xml(base),
+        media_type="application/xml",
+        headers={"Cache-Control": "public, max-age=3600"},
+    )
 
 
 class HeaderLimits:
@@ -1003,8 +1118,13 @@ def humans(request: Request) -> Response:
 
 def robots(request: Request) -> Response:
     """Rooms and notes stay out of indexes (they also carry X-Robots-Tag: noindex);
-    the manual is explicitly crawlable so agents can find the protocol."""
-    return text(ROBOTS)
+    the manual is explicitly crawlable so agents can find the protocol — which is now also
+    true of the header the manual is served with, and was not before 0.3.1.
+
+    Generated per request rather than held as a constant because the Sitemap directive
+    takes an absolute URL, which is only known once the origin is.
+    """
+    return text(manifest.robots_txt(_base_url(request)), index=True)
 
 
 def healthz(request: Request) -> Response:
@@ -1287,7 +1407,10 @@ app = Starlette(
         Route("/skill.md", skill_md),
         Route("/patterns.md", patterns),
         Route("/openapi.json", openapi),
+        Route("/sitemap.xml", sitemap),
         Route("/.well-known/agent.json", agent_json),
+        Route("/.well-known/api-catalog", api_catalog),
+        Route("/.well-known/agent-skills/index.json", agent_skills),
         Route("/humans", humans),
         Route("/robots.txt", robots),
         Route("/healthz", healthz),
