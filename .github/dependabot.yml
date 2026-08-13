@@ -1,0 +1,24 @@
+version: 2
+
+# Why this file exists: security alerts arrive without any config — that is how the
+# Starlette advisories were caught — but *version* updates do not, and GitHub Actions has no
+# advisory feed of comparable coverage. So nothing was watching the workflows at all, and
+# they drifted until five of the six pinned actions were still requesting the Node 20
+# runtime GitHub had already deprecated. A deprecated runtime is not a CVE; it is a build
+# that stops working on a date nobody is tracking. This is the thing that notices.
+#
+# Actions only, deliberately. Python pins are updated deliberately alongside `uv.lock` and
+# already have advisory coverage; adding `pip` and `docker` here is a one-line change if the
+# routine bump PRs turn out to be wanted.
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly
+    # Majors are where the runtime bumps live (v7 of setup-uv is the node20 -> node24 move),
+    # so they must not be filtered out — grouping keeps that one PR instead of six.
+    groups:
+      actions:
+        patterns: ["*"]
+    commit-message:
+      prefix: "ci"

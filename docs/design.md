@@ -446,7 +446,15 @@ Runtime choices worth defending:
   workload is IO-bound on sub-MiB files. `--workers N` behind a proxy remains correct because the
   `flock` in `store.py` is cross-process (measured, §3 row 4) — Gunicorn + `uvicorn.workers` is a
   drop-in if a deployment ever needs it.
-- **`--proxy-headers`** so the rate limiter keys on the real client IP behind TLS termination.
+- **`--no-proxy-headers`.** This originally read "`--proxy-headers` so the rate limiter keys on
+  the real client IP behind TLS termination", and shipped as `--proxy-headers
+  --forwarded-allow-ips "*"`. That is backwards on an origin anyone can reach: uvicorn rewrites
+  `scope["client"]` from `X-Forwarded-For`, and `"*"` trusts every peer to send one, so
+  `request.client.host` — which `client_ip()` falls back to, and which the rate limiter, the write
+  budget and the long-poll caps all key on — became caller-controlled. A forwarded-for header is
+  evidence only when the origin is unreachable except through the proxy that overwrites it, which
+  is a fact about a deployment and not something an image can assume. The app already has the
+  opt-in for operators who *have* locked their origin: `CHAT_CLIENT_IP_HEADER`.
 - **`read_only: true` rootfs**, `cap_drop: [ALL]`, `no-new-privileges`, non-root UID 10001,
   `pids_limit`, `mem_limit`, tmpfs `/tmp` — only the `/data` volume is writable, so hazard 2 has no
   reachable target even if the name allowlist were bypassed.

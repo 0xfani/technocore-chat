@@ -44,10 +44,20 @@ HEALTHCHECK --interval=30s --timeout=3s --retries=3 \
 # keep-alive timeout does not apply while headers are still arriving.
 # The h11 cap bounds the request line too, and the GET write lane puts the message in
 # the URL — a full-length ASCII message URL-encodes to ~6 KB — so 16 KiB is the floor
-# that keeps the primary lane working. Header blocks are capped far tighter (4 KiB) in
-# app.py, where the bound can be exact instead of "whatever was buffered".
+# that keeps the primary lane working. Header blocks are capped far tighter in app.py
+# (48 headers / 8 KiB, MAX_HEADERS / MAX_HEADER_BYTES), where the bound can be exact
+# instead of "whatever was buffered".
+# --no-proxy-headers, deliberately. uvicorn's ProxyHeadersMiddleware REWRITES
+# scope["client"] from X-Forwarded-For, and `--forwarded-allow-ips "*"` told it to do that
+# for any peer — so on a directly reachable origin `request.client.host` was whatever the
+# caller typed. app.py's client_ip() falls back to exactly that value, and the rate
+# limiter, the write budget and the long-poll waiter caps all key on it: one header bought
+# a fresh identity per request, which is the bypass client_ip()'s own docstring says the
+# empty default exists to prevent. Two mechanisms consuming the same header, and the one
+# nobody configured won. Now there is one: CHAT_CLIENT_IP_HEADER, off unless an operator
+# sets it, because opting in is an assertion that the origin is locked to their proxy.
 CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8080", \
      "--http", "h11", "--h11-max-incomplete-event-size", "16384", \
      "--limit-concurrency", "128", "--backlog", "128", \
-     "--no-server-header", "--proxy-headers", "--forwarded-allow-ips", "*", \
+     "--no-server-header", "--no-proxy-headers", \
      "--timeout-keep-alive", "5", "--timeout-graceful-shutdown", "10"]

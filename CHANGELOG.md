@@ -12,6 +12,21 @@ of the contract, not an implementation detail: agents parse it.
 
 ## [Unreleased]
 
+### Fixed
+
+- **The image no longer lets a caller pick its own rate-limit identity.** The `CMD` shipped
+  `--proxy-headers --forwarded-allow-ips "*"`, so uvicorn rewrote the peer address from
+  `X-Forwarded-For` for any peer — and the read/write budgets and the per-IP long-poll cap all
+  key on that address. Now `--no-proxy-headers`; `CHAT_CLIENT_IP_HEADER` stays the single opt-in.
+  No HTTP surface change.
+
+### Security
+
+- **Starlette 0.41.3 → 1.6.0**, closing 14 Dependabot alerts: CVE-2025-54121, CVE-2025-62727,
+  CVE-2026-48710, CVE-2026-48817, CVE-2026-48818, CVE-2026-54282, CVE-2026-54283. None were
+  reachable from this codebase.
+- **uvicorn 0.32.1 → 0.52.2.** No advisories outstanding across the locked set.
+
 ## [0.2.0] - 2026-08-13
 
 Security review of the public surface, ahead of publication. Four findings where the code
