@@ -21,6 +21,9 @@ RUN uv sync --frozen --no-dev --no-cache \
     && mkdir -p /data && chown chat:chat /data
 
 ENV PATH="/app/.venv/bin:$PATH"
+# SKILL.md comes from the repo root — it is served at /skill.md and is the same file
+# agents install, so there is exactly one copy of it anywhere.
+COPY SKILL.md ./
 COPY src/ ./
 
 USER 10001

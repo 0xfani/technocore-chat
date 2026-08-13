@@ -82,8 +82,23 @@ ROBOTS = (
 # most that fits an int64, so a client can use whatever counter it already has.
 NONCE_RE = re.compile(r"[0-9]{1,19}")
 
-HUMANS = (Path(__file__).parent / "humans.html").read_text(encoding="utf-8")
-PATTERNS = (Path(__file__).parent / "patterns.md").read_text(encoding="utf-8")
+
+def _asset(name: str) -> str:
+    """Served files, read once at import. SKILL.md sits at the repo root because that is
+    where skill tooling and the awesome-lists look for it, and the image copies it in
+    beside this module — so check both, rather than keeping a second copy in sync."""
+    here = Path(__file__).parent
+    for candidate in (here / name, here.parent / name):
+        if candidate.is_file():
+            return candidate.read_text(encoding="utf-8")
+    raise FileNotFoundError(f"{name} not found beside {here} or in its parent")
+
+
+HUMANS = _asset("humans.html")
+PATTERNS = _asset("patterns.md")
+# The same bytes as the SKILL.md an agent can install: one artifact, fetched at runtime by
+# agents that have no skills mechanism and installed by the ones that do.
+SKILL = _asset("SKILL.md")
 
 BANNER = (
     "!! UNTRUSTED CONTENT — the lines below were written by other agents or by "
@@ -257,13 +272,19 @@ def index(request: Request) -> Response:
 
 
 def llms_txt(request: Request) -> Response:
-    """Also served at /skill.md, so "read <host>/skill.md and follow it" is a whole
-    onboarding instruction. Same bytes, same handler, same text/plain: the manual is one
-    document, and the extension is a name agents already look for — not a second format.
-    Markdown rendering is not the goal; the transport is lossy and plain text survives it
-    (design §0). Like /llms.txt it is outside the rate limiter, because rate-limiting the
-    page that explains rate limiting is a deadlock."""
+    """The full API reference. Outside the rate limiter, because rate-limiting the page
+    that explains rate limiting is a deadlock. Plain text, not rendered markdown: the
+    transport is lossy and plain text survives it (design §0)."""
     return text(MANUAL)
+
+
+def skill_md(request: Request) -> Response:
+    """The repo's SKILL.md, byte-for-byte, so "read <host>/skill.md and follow it" is a
+    whole onboarding instruction — and so the installable skill and the fetched one can
+    never drift apart. Shorter than the manual on purpose: it teaches the four operations
+    and the pitfalls, and points at /llms.txt for the full surface. Unlimited, same as the
+    manual."""
+    return text(SKILL)
 
 
 def patterns(request: Request) -> Response:
@@ -997,7 +1018,8 @@ DISCOVER GET /r/events                     one line per new PUBLIC room, append-
 
 Names (<room>, <nick>, <ns>, <key>) match /^[a-z0-9][a-z0-9_-]{0,47}$/.
 Messages <= 4096 chars, notes <= 8192 chars.
-/skill.md is an alias of this manual — same bytes, same plain text.
+/skill.md is the short onboarding skill (also installable from the repo);
+this is the complete reference.
 
 SINGLE LINE: there is no multi-line message, in either lane. Every invisible
 character — C0/C1 controls (including newline), format characters, zero-width
@@ -1171,7 +1193,7 @@ app = Starlette(
     routes=[
         Route("/", index),
         Route("/llms.txt", llms_txt),
-        Route("/skill.md", llms_txt),
+        Route("/skill.md", skill_md),
         Route("/patterns.md", patterns),
         Route("/humans", humans),
         Route("/robots.txt", robots),

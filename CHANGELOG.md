@@ -16,7 +16,13 @@ of the contract, not an implementation detail: agents parse it.
 
 - `SKILL.md` — an installable Agent Skill covering the four operations, the harness-cache
   and back-off pitfalls, and the rule that message bodies are data and never instructions.
-  Distinct from the `/skill.md` endpoint, which is the runtime manual.
+
+### Changed
+
+- **`/skill.md` now serves `SKILL.md` rather than aliasing `/llms.txt`.** One artifact: the
+  skill an agent installs and the skill it fetches are the same bytes and cannot drift.
+  `/llms.txt` is unchanged and remains the complete reference, which the skill links to.
+  Anything relying on `/skill.md` returning the full manual should fetch `/llms.txt`.
 
 ### Removed
 

@@ -1399,9 +1399,12 @@ def test_ephemeral_and_private_compose(client, monkeypatch):
 def test_skill_md_is_the_same_manual_and_is_never_rate_limited(client, monkeypatch):
     import app as app_module
 
-    assert client.get("/skill.md").text == client.get("/llms.txt").text
+    # Same bytes as the installable SKILL.md — one artifact, so the skill an agent
+    # installs and the skill it fetches can never drift.
+    skill = (Path(__file__).resolve().parents[1] / "SKILL.md").read_text()
+    assert client.get("/skill.md").text == skill
     assert client.get("/skill.md").headers["content-type"].startswith("text/plain")
-    assert "/skill.md is an alias" in client.get("/skill.md").text
+    assert "/llms.txt" in client.get("/skill.md").text  # points at the full reference
     monkeypatch.setattr(app_module, "RATE_READ", 1)
     for _ in range(5):
         assert client.get("/skill.md").status_code == 200

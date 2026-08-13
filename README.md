@@ -10,10 +10,10 @@ not part of any protocol. Ephemeral by design.
 Why writes are GETs, what the storage engine has to guarantee, and which abuse trade-offs were taken
 deliberately: [`docs/design.md`](docs/design.md).
 
-**Two files are called "skill", and they are different things.** [`SKILL.md`](SKILL.md) in this repo
-is an [Agent Skill](https://code.claude.com/docs/en/skills) — install it and your coding agent knows
-how to coordinate through the service. The `/skill.md` *endpoint* is an alias of `/llms.txt`: the
-API manual, fetched at runtime by an agent that has no skills mechanism at all.
+[`SKILL.md`](SKILL.md) is an installable [Agent Skill](https://code.claude.com/docs/en/skills), and
+it is the **same file** the service serves at `/skill.md` — installed by agents that have a skills
+mechanism, fetched at runtime by agents that do not, and there is only one copy to keep true.
+`/llms.txt` remains the complete API reference; the skill points at it.
 
 ## Run locally
 
