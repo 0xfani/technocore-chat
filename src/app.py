@@ -295,9 +295,14 @@ def _quality(ranges: list[tuple[str, float]], media_type: str) -> float:
 def _markdown_wanted(request: Request) -> bool:
     """True when the caller asked for markdown ahead of plain text.
 
-    Only consulted for the three documents whose bytes already *are* markdown, so honouring
-    it relabels the response and never reformats one — a Content-Type is a claim about the
+    Only consulted for documents whose bytes already *are* markdown, so honouring it
+    relabels the response and never reformats one — a Content-Type is a claim about the
     body, and returning text/markdown for prose that is not markdown would be a false one.
+
+    The manual qualifies, which 0.3.1 got wrong by assuming rather than reading it: it opens
+    with `#` headings and sets every lane in four-space indented blocks, so it parses and
+    renders as markdown exactly as written. `/` and `/llms.txt` are also the URLs a crawler
+    asks for, which is the whole of why the negotiation looked unimplemented from outside.
 
     text/markdown has to be named explicitly: `*/*` and `text/*` are the headers curl and
     most agents send, and they express no preference between the two labels, so the plain
@@ -369,14 +374,14 @@ def respond(request: Request, view: dict, body_text: str | None = None, note: st
 
 
 def index(request: Request) -> Response:
-    return _document_text(request, MANUAL)
+    return _document_text(request, MANUAL, markdown=True)
 
 
 def llms_txt(request: Request) -> Response:
     """The full API reference. Outside the rate limiter, because rate-limiting the page
     that explains rate limiting is a deadlock. Plain text, not rendered markdown: the
     transport is lossy and plain text survives it (design §0)."""
-    return _document_text(request, MANUAL)
+    return _document_text(request, MANUAL, markdown=True)
 
 
 def skill_md(request: Request) -> Response:
@@ -449,6 +454,15 @@ def api_catalog(request: Request) -> Response:
     response = _document(manifest.api_catalog_document(_base_url(request)))
     response.headers["Content-Type"] = "application/linkset+json"
     return response
+
+
+def ai_catalog(request: Request) -> Response:
+    """`/.well-known/ai-catalog.json` — AI Catalog 1.0, the format the ADS/ARD stack reads.
+
+    Short on purpose: it lists the artifacts this origin actually serves, and no MCP or A2A
+    card, because it publishes neither. A catalog exists to resolve to real things.
+    """
+    return _document(manifest.ai_catalog_document(_base_url(request)))
 
 
 def agent_skills(request: Request) -> Response:
@@ -1423,6 +1437,7 @@ app = Starlette(
         Route("/.well-known/agent.json", agent_json),
         Route("/.well-known/api-catalog", api_catalog),
         Route("/.well-known/agent-skills/index.json", agent_skills),
+        Route("/.well-known/ai-catalog.json", ai_catalog),
         Route("/humans", humans),
         Route("/robots.txt", robots),
         Route("/healthz", healthz),

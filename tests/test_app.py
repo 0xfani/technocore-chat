@@ -2194,3 +2194,31 @@ def test_no_oauth_metadata_is_served_for_an_issuer_that_does_not_exist(client):
 def test_auth_md_is_reachable_from_the_sitemap(client):
     """A document no crawler is told about is a document the scanners will not find."""
     assert "/auth.md" in client.get("/sitemap.xml").text
+
+
+def test_the_root_and_manual_negotiate_markdown(client):
+    """The URLs a crawler actually asks for. 0.3.1 wired negotiation to /skill.md and
+    /patterns.md but not to / or /llms.txt, so from outside the feature looked absent —
+    and the manual does qualify: it opens with `#` headings and sets its lanes in
+    four-space indented blocks, so those bytes parse and render as markdown as written."""
+    md = {"Accept": "text/markdown"}
+    for path in ("/", "/llms.txt", "/skill.md", "/patterns.md", "/auth.md"):
+        got = client.get(path, headers=md).headers["content-type"]
+        assert got.startswith("text/markdown"), f"{path} answered {got}"
+        assert client.get(path).headers["content-type"].startswith("text/plain")
+
+
+def test_the_ai_catalog_lists_only_artifacts_that_resolve(client):
+    """A catalog exists to resolve to real things. Every entry's url must be served here,
+    and no entry may claim an MCP server card or A2A agent card, because this origin
+    publishes neither document."""
+    doc = client.get("/.well-known/ai-catalog.json").json()
+    assert doc["specVersion"] == "1.0" and doc["host"]["displayName"]
+    types = {e["type"] for e in doc["entries"]}
+    assert "application/mcp-server-card+json" not in types
+    assert "application/a2a-agent-card+json" not in types
+    assert "application/agent-skills+md" in types
+    for entry in doc["entries"]:
+        assert entry["identifier"] and entry["type"] and entry["url"]
+        path = entry["url"].split("testserver", 1)[-1] or "/"
+        assert client.get(path).status_code == 200, f"{entry['identifier']} -> {path}"

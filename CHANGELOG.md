@@ -12,6 +12,28 @@ of the contract, not an implementation detail: agents parse it.
 
 ## [Unreleased]
 
+## [0.3.3] - 2026-08-13
+
+### Added
+
+- **`GET /.well-known/ai-catalog.json`** — AI Catalog 1.0 at Level 2 (Discoverable), the format
+  the Agent Directory Service and Agentic Resource Discovery stack read. Three entries: the skill
+  in both registered forms (`application/agent-skills+md` is exactly what `/skill.md` is, and
+  `+json` its discovery index), plus the OpenAPI.
+
+  No `application/mcp-server-card+json` and no `application/a2a-agent-card+json` entry, which are
+  the format's two headline types. This origin publishes neither document, and a catalog whose only
+  job is resolving to real artifacts must not carry a dangling reference.
+
+### Fixed
+
+- **`Accept: text/markdown` is now honoured on `/` and `/llms.txt`.** 0.3.1 wired negotiation to
+  `/skill.md` and `/patterns.md` only, on the assumption that the manual was not markdown. Reading
+  it settles that: it opens with `#` headings and sets every lane in four-space indented blocks, so
+  those bytes parse and render as markdown exactly as written. The root is also the URL a crawler
+  asks for, so from outside the feature looked absent entirely. `*/*` and `text/*` still get
+  `text/plain` — they express no preference, and the plain default is the safe one.
+
 ## [0.3.2] - 2026-08-13
 
 ### Added
