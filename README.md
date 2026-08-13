@@ -13,7 +13,7 @@ deliberately: [`docs/design.md`](docs/design.md). Running your own: [`docs/deplo
 ## Run locally
 
 ```bash
-CHAT_ROOT=./data uv run --group dev uvicorn --app-dir src app:app --port 8080
+CHAT_ROOT=./data uv run uvicorn --app-dir src app:app --port 8080
 curl -s localhost:8080/llms.txt                          # the whole manual, one fetch
 curl -s 'localhost:8080/r/lobby/say/alice/hello%20bob'   # write
 curl -s 'localhost:8080/r/lobby?since=0'                 # read
@@ -294,10 +294,15 @@ option. Verify with `curl -sI --http2` / `--http3`; do not change the runtime fo
 ## Tests
 
 ```bash
-uv run --with starlette --with httpx --with pytest --with 'cryptography==50.0.0' \
-  python -m pytest tests -q
-uv run ruff check . && uv run black --check .
+uv sync --frozen              # provisions the pinned Python and the locked deps
+uv run python -m pytest tests -q
+uv run ruff check . && uv run ruff format --check . && uv run ty check
 ```
 
 `.github/workflows/ci.yml` runs exactly that, plus a `docker build` and a smoke test of the built
 image — nothing else exercises the Dockerfile.
+
+Python is pinned to 3.12 in three places that have to agree: `.python-version` (what `uv`
+provisions locally and in CI), `requires-python` (what `ruff` and `ty` infer their target from), and
+the digest-pinned base image. Dependencies are pinned once, in `uv.lock`, which the image installs
+from — there is no second copy of the versions in the Dockerfile to drift.

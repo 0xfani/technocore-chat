@@ -195,7 +195,7 @@ def reverse_lines(f, chunk_size: int = 65536, max_bytes: int = 1 << 20):
     """Yield complete lines from the end of a binary file, newest first."""
     f.seek(0, os.SEEK_END)
     pos = f.tell()
-    head = b""          # possibly-incomplete first line of what we've read so far
+    head = b""  # possibly-incomplete first line of what we've read so far
     read = 0
     while pos > 0 and read < max_bytes:
         step = min(chunk_size, pos, max_bytes - read)
@@ -204,11 +204,11 @@ def reverse_lines(f, chunk_size: int = 65536, max_bytes: int = 1 << 20):
         block = f.read(step)
         read += step
         parts = (block + head).split(b"\n")
-        head = parts.pop(0)          # carry the partial line leftwards
+        head = parts.pop(0)  # carry the partial line leftwards
         for line in reversed(parts):
-            if line:                 # skips the empty tail from a trailing "\n"
+            if line:  # skips the empty tail from a trailing "\n"
                 yield line
-    if head and pos == 0:            # first line of the file, only once we reach BOF
+    if head and pos == 0:  # first line of the file, only once we reach BOF
         yield head
 ```
 
@@ -216,15 +216,15 @@ Consumed by a cursor read that stops as soon as it walks past the caller's `sinc
 
 ```python
 for raw in reverse_lines(f):
-    rec = _parse(raw)                # torn/garbage lines -> None, skipped
+    rec = _parse(raw)  # torn/garbage lines -> None, skipped
     if rec is None:
         continue
     if since is not None and rec["seq"] <= since:
-        break                        # everything older is older still: stop
+        break  # everything older is older still: stop
     out.append(rec)
     if len(out) >= limit:
         break
-out.reverse()                        # oldest-first for the reader
+out.reverse()  # oldest-first for the reader
 ```
 
 Properties: never loads the file; `mmap` deliberately avoided (a concurrent `os.replace` from
@@ -471,10 +471,11 @@ appends, unicode, input rejection, the room overview, the header contract, and b
 properties from §3.3 (actionable 429 body, budget warning before the wall):
 
 ```
-uv run --group dev python -m pytest tests -q
+uv run python -m pytest tests -q
 ```
 
-CI runs the suite plus `ruff`/`black`, a `docker build` and a smoke test of the built image on
+CI runs the suite plus `ruff check`, `ruff format --check`, `ty check`, a `docker build` and a
+smoke test of the built image on
 every push and pull request — no path filters, because a world-writable service should never
 merge a change that ran none of this.
 

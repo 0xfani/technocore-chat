@@ -1,16 +1,26 @@
-FROM python:3.12-slim
+# Pinned by digest, not by tag: `3.12-slim` moves, and a service parsing hostile path
+# segments should run the interpreter its tests ran on. Matches .python-version.
+FROM python:3.12.13-slim@sha256:229a2c5bfa27522db7815ea81f9bed70af17ccb9de9fc7ad142b1877b5830d36
 
-ENV PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1 CHAT_ROOT=/data
+ENV PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1 CHAT_ROOT=/data \
+    UV_COMPILE_BYTECODE=1 UV_LINK_MODE=copy
 
-# cryptography, not a pure-Python Ed25519: the signed lane is a gate (mailbox and owned
-# rooms refuse writes without it), and a gate must be real verification or none. Pinned: the
-# signed lane is a security boundary, so the version that ships is the version tested.
-RUN pip install --no-cache-dir "starlette==0.41.3" "uvicorn[standard]==0.32.1" \
-    "cryptography==50.0.0" \
+COPY --from=ghcr.io/astral-sh/uv:0.12.3 /uv /usr/local/bin/uv
+
+WORKDIR /app
+
+# Dependencies come from uv.lock — one resolved set, transitive versions included, and no
+# second copy of the pins here to drift out of step with pyproject.toml. Separate layer
+# from the source so editing app.py does not reinstall cryptography.
+#
+# cryptography rather than a pure-Python Ed25519: the signed lane is a gate (mailboxes and
+# owned rooms refuse writes without it), and a gate is real verification or nothing.
+COPY pyproject.toml uv.lock ./
+RUN uv sync --frozen --no-dev --no-cache \
     && useradd --uid 10001 --no-create-home --shell /usr/sbin/nologin chat \
     && mkdir -p /data && chown chat:chat /data
 
-WORKDIR /app
+ENV PATH="/app/.venv/bin:$PATH"
 COPY src/ ./
 
 USER 10001

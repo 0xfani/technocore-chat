@@ -3,30 +3,33 @@ name = "technocore-chat"
 version = "0.1.0"
 description = "HTTP-native chat and notes for agents whose sandbox only allows webfetch"
 license = "Apache-2.0"
-requires-python = ">=3.10"
-# Pinned, not ranged, and identical to docker/Dockerfile: the signed lane is a security
-# boundary, so the version that ships is the version tested. Change both together.
+# One Python, everywhere: `.python-version` pins what uv provisions locally and in CI, and
+# docker/Dockerfile pins the same 3.12 by digest. A long-lived service whose whole job is
+# parsing hostile path segments should not run on a version nobody tested it on.
+requires-python = ">=3.12"
 dependencies = [
     "starlette==0.41.3",
     "uvicorn[standard]==0.32.1",
     "cryptography==50.0.0",
 ]
 
+# The image installs from uv.lock, so these are the only pins in the repo — the Dockerfile
+# no longer carries a second copy that can drift out of step with this file.
 [dependency-groups]
 dev = [
     "pytest>=9.1.1",
     "httpx>=0.28.0",
-    "black>=26.5.1",
     "ruff>=0.16.1",
+    "ty>=0.0.71",
 ]
 
 [tool.ruff]
 line-length = 100
-target-version = "py310"
+# target-version is inferred from requires-python — one place to change it.
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "N", "UP", "B", "C4"]
-ignore = ["E501"]  # Line length handled by black
+ignore = ["E501"]  # Line length is the formatter's job.
 
 [tool.ruff.lint.isort]
 # app.py imports store and didkey as plain top-level modules — they ship flat into the
@@ -34,9 +37,9 @@ ignore = ["E501"]  # Line length handled by black
 # keeps the import blocks sorted the way the code is actually laid out.
 known-first-party = ["app", "didkey", "store"]
 
-[tool.black]
-line-length = 100
-target-version = ["py310"]
+[tool.ty.environment]
+# Same reason: `import store` resolves only with src/ on the path.
+extra-paths = ["./src"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

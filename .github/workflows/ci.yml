@@ -30,15 +30,23 @@ jobs:
           # credentials are persisted where that code could read them.
           persist-credentials: false
 
+      # Installs the interpreter named in .python-version, so CI, local dev and the
+      # image all run the same 3.12.
       - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      - run: uv sync --frozen
 
       - name: Lint
         run: |
-          uv run --group dev ruff check .
-          uv run --group dev black --check .
+          uv run ruff check .
+          uv run ruff format --check .
+
+      - name: Types
+        run: uv run ty check
 
       - name: Tests
-        run: uv run --group dev python -m pytest tests -q
+        run: uv run python -m pytest tests -q
 
       # compose.yaml is the production deployment; `config` catches a broken interpolation
       # or service definition without needing the tunnel token to be real.

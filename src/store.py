@@ -17,7 +17,7 @@ import re
 import time
 import unicodedata
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 import didkey
@@ -257,7 +257,7 @@ def _now() -> str:
     Records written before this change carry a second-precision `ts`. Nothing parses `ts`
     (it is passed through as an opaque string), so both forms coexist without a migration.
     """
-    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+    return datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
 
 
 def counters(root: Path) -> dict:
@@ -339,7 +339,7 @@ def _expired(rec: dict, cutoff: float) -> bool:
     if isinstance(ts, str):
         for fmt in ("%Y-%m-%dT%H:%M:%S.%fZ", "%Y-%m-%dT%H:%M:%SZ"):
             try:
-                return datetime.strptime(ts, fmt).replace(tzinfo=timezone.utc).timestamp() < cutoff
+                return datetime.strptime(ts, fmt).replace(tzinfo=UTC).timestamp() < cutoff
             except ValueError:
                 continue
     return True
@@ -908,6 +908,12 @@ def _write_record(
         # Also under the lock, or two concurrent replays of one captured URL would both
         # read the same "last nonce" and both write.
         if did is not None:
+            # The signature is `did: str | None, nonce: int | None`, which does not say
+            # that a signed write must carry both. Assert it rather than assume it: with
+            # nonce None this used to reach `None <= int` and raise TypeError — a 500 on
+            # the replay-protection path instead of a refusal that says what was wrong.
+            if nonce is None:
+                raise StoreError("a signed write must carry a nonce")
             previous = _last_nonce(root, room, did)
             if previous is not None and nonce <= previous:
                 raise StoreError(

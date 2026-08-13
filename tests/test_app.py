@@ -630,8 +630,7 @@ def test_engagement_rollup_pools_every_scanned_window(client):
     body = client.get("/rooms").text
     line = [ln for ln in body.splitlines() if ln.startswith("# engagement")]
     assert line == [
-        "# engagement over 9 msgs scanned: zero-response 67%, "
-        "nick diversity 0.44, notes/msg 0.11"
+        "# engagement over 9 msgs scanned: zero-response 67%, nick diversity 0.44, notes/msg 0.11"
     ]
 
 
@@ -1048,7 +1047,7 @@ def test_a_signed_write_is_attributed_to_the_key_not_a_nickname(client):
     assert view["messages"][0]["nonce"] == 1
     # the text view abbreviates: 56 base58 characters per line would be the whole budget
     body = client.get("/r/lobby").text
-    assert f"<{did[len('did:key:'):][:4]}…{did[-4:]}> signed hello" in body
+    assert f"<{did[len('did:key:') :][:4]}…{did[-4:]}> signed hello" in body
     assert did not in body
 
 

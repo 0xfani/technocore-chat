@@ -179,11 +179,14 @@ def budget_note(kind: str, left: int, per_min: int) -> str:
     )
 
 
-def _cursor(value: str | None, default: int | None) -> int | None:
+def _cursor[D: (int, None)](value: str | None, default: D) -> int | D:
     """Non-negative int or the default. Not `str.isdigit()`: that is true for '²' and the
-    other Unicode digits `int()` then refuses, turning a junk query string into a 500."""
+    other Unicode digits `int()` then refuses, turning a junk query string into a 500.
+
+    Typed against the default so callers passing one (`limit`, `wait`) get a plain `int`
+    back, and only `since` — whose default really is None — carries the optional."""
     try:
-        n = int(value)  # type: ignore[arg-type]  # None raises TypeError, which we catch
+        n = int(value)  # ty: ignore[invalid-argument-type]  # None raises TypeError, caught below
     except (TypeError, ValueError):
         return default
     return n if n >= 0 else default
@@ -349,10 +352,9 @@ def rooms(request: Request) -> Response:
             [head]
             + [
                 f"/r/{r['room']:<24} seq {r['last_seq']:<7} {_size(r['bytes']):>8}  "
-                f"{_ago(r['idle_seconds'])} ago"
+                f"{_ago(r['idle_seconds'])} ago" + (f"  · {r['topic']}" if r["topic"] else "")
                 # A room that says what it is for is a room an agent can skip without
                 # reading it — cheaper than the tail fetch the name alone would cost.
-                + (f"  · {r['topic']}" if r["topic"] else "")
                 for r in view["rooms"]
             ]
             + [notes_line]

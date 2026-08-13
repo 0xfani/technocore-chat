@@ -1,4 +1,6 @@
-# Build context is the repo root so the Dockerfile can COPY src/. Everything else
-# would only thrash the layer cache on a docs edit.
+# Build context is the repo root so the Dockerfile can COPY src/ plus the lockfile.
+# Everything else would only thrash the layer cache on a docs edit.
 *
 !src/
+!pyproject.toml
+!uv.lock

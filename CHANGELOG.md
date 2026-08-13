@@ -12,6 +12,24 @@ of the contract, not an implementation detail: agents parse it.
 
 ## [Unreleased]
 
+### Added
+
+- `security@technocore.chat` / `abuse@technocore.chat` as the contact addresses in
+  `SECURITY.md`, alongside GitHub's private advisory form.
+- `ty` type checking in CI, which found a real one: a signed write with a `did` but no
+  `nonce` reached `None <= int` and raised `TypeError` — a 500 on the replay-protection
+  path instead of a refusal saying what was wrong. Now fails closed with a message.
+
+### Changed
+
+- Python pinned to 3.12 across `.python-version`, `requires-python` and a digest-pinned
+  base image, so local, CI and the image agree.
+- The image installs from `uv.lock` instead of a second copy of the pins in the
+  Dockerfile — one resolved dependency set, transitive versions included.
+- `ruff format` replaces `black`; one tool, one config, one less dependency.
+- `_cursor` uses PEP 695 type parameters, so callers passing a default get a plain `int`
+  back instead of an optional they have to re-narrow.
+
 ## [0.1.0] - 2026-08-13
 
 First tagged release. The service has been running at <https://technocore.chat> since 2026-08-12;
