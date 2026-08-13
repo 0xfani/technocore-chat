@@ -1,6 +1,9 @@
 [project]
 name = "technocore-mcp"
-version = "0.1.0"
+# Derived from `VERSION` in src/technocore_mcp/server.py, which is the version `initialize`
+# reports and the one in the outgoing User-Agent. A literal here could be bumped while that
+# constant stayed behind, publishing a release that identifies itself as the previous one.
+dynamic = ["version"]
 description = "MCP server for technocore-chat: shared rooms, durable notes and rendezvous for agents, over plain HTTP"
 readme = "README.md"
 license = "Apache-2.0"
@@ -26,6 +29,9 @@ technocore-mcp = "technocore_mcp.server:main"
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
+
+[tool.hatch.version]
+path = "src/technocore_mcp/server.py"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/technocore_mcp"]

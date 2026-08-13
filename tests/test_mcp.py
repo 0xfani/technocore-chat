@@ -300,6 +300,33 @@ def test_stdio_framing_is_one_json_object_per_line(mcp):
     assert [line["id"] for line in lines] == [1, 2]  # the notification produced nothing
 
 
+def test_a_batch_is_answered_by_one_array(mcp):
+    """Batches are gone from 2025-06-18 but both older versions this server advertises have
+    them, and there the reply to a batch is a single array. One top-level object per member
+    is a different message: the client either rejects it or pairs replies with the wrong
+    requests. A batch that is all notifications is answered by nothing, like a lone one."""
+    server, _ = mcp
+    stdout = io.StringIO()
+    server.serve(
+        io.StringIO(
+            json.dumps(
+                [
+                    {"jsonrpc": "2.0", "id": 1, "method": "ping"},
+                    {"jsonrpc": "2.0", "method": "notifications/initialized"},
+                    {"jsonrpc": "2.0", "id": 2, "method": "tools/list"},
+                ]
+            )
+            + "\n"
+            + json.dumps([{"jsonrpc": "2.0", "method": "notifications/cancelled"}])
+            + "\n"
+        ),
+        stdout,
+    )
+    lines = [json.loads(line) for line in stdout.getvalue().splitlines()]
+    assert len(lines) == 1  # the all-notification batch produced no line at all
+    assert [reply["id"] for reply in lines[0]] == [1, 2]
+
+
 def test_malformed_json_does_not_kill_the_session(mcp):
     """A client that writes a torn line should get a parse error and keep its session —
     exiting would lose every tool the model was mid-way through using."""
@@ -316,15 +343,22 @@ def test_malformed_json_does_not_kill_the_session(mcp):
 # ------------------------------------------------------------------ packaging
 
 
-def test_the_three_places_that_declare_a_version_agree():
+def test_every_place_that_declares_a_version_agrees():
     """server.json states the version twice — once for the server, once for the package —
-    and pyproject a third time. Publishing with them out of step ships a release that says
-    it is something other than what it is, and the registry keeps whatever it was told."""
+    and `server.VERSION` a third time, as the version `initialize` and the User-Agent report.
+    Publishing with them out of step ships a release that says it is something other than what
+    it is, and the registry keeps whatever it was told. `mcp/pyproject.toml` is not in this
+    list on purpose: it declares the version dynamic and reads it from `server.VERSION`, so
+    the wheel cannot be built with a version the running code does not report."""
+    from technocore_mcp import server as mcp_server
+
     manifest = json.loads((ROOT / "mcp" / "server.json").read_text())
     pyproject = (ROOT / "mcp" / "pyproject.toml").read_text()
     version = manifest["version"]
     assert manifest["packages"][0]["version"] == version
-    assert f'version = "{version}"' in pyproject
+    assert mcp_server.VERSION == version
+    assert 'dynamic = ["version"]' in pyproject
+    assert 'path = "src/technocore_mcp/server.py"' in pyproject
     assert manifest["packages"][0]["identifier"] in pyproject  # the PyPI name is the built name
 
 

@@ -27,6 +27,10 @@ import urllib.request
 
 from . import protocol
 
+# The single place this package's version is written: `mcp/pyproject.toml` reads it from
+# here at build time, so the wheel, `initialize`'s serverInfo and the User-Agent cannot
+# disagree. `mcp/server.json` states it twice more, which a test and the release workflow
+# check against this constant.
 VERSION = "0.1.0"
 DEFAULT_URL = "https://technocore.chat"
 TIMEOUT = 30.0  # comfortably over the service's own 10s long-poll ceiling

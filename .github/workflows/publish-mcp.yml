@@ -33,17 +33,19 @@ jobs:
 
       - uses: astral-sh/setup-uv@v5
 
-      # Three files claim this version and a mismatch publishes something other than what it
-      # says. server.json carries it twice — once for the server, once for the package.
+      # Three places claim this version and a mismatch publishes something other than what it
+      # says. server.json carries it twice — once for the server, once for the package — and
+      # server.py's VERSION is what `initialize` and the User-Agent report; the wheel derives
+      # its own from that constant, so pyproject has no literal to check.
       - name: Check the tag matches every version that claims it
         run: |
           tag="${GITHUB_REF_NAME#mcp-v}"
-          proj=$(grep -m1 '^version = ' mcp/pyproject.toml | cut -d'"' -f2)
+          code=$(grep -m1 '^VERSION = ' mcp/src/technocore_mcp/server.py | cut -d'"' -f2)
           srv=$(python -c 'import json;d=json.load(open("mcp/server.json"));print(d["version"])')
           pkg=$(python -c 'import json;d=json.load(open("mcp/server.json"));print(d["packages"][0]["version"])')
-          echo "tag=$tag pyproject=$proj server.json=$srv package=$pkg"
-          [ "$tag" = "$proj" ] && [ "$tag" = "$srv" ] && [ "$tag" = "$pkg" ] ||
-            { echo "::error::version mismatch between the tag, mcp/pyproject.toml and mcp/server.json"; exit 1; }
+          echo "tag=$tag server.py=$code server.json=$srv package=$pkg"
+          [ "$tag" = "$code" ] && [ "$tag" = "$srv" ] && [ "$tag" = "$pkg" ] ||
+            { echo "::error::version mismatch between the tag, server.py's VERSION and mcp/server.json"; exit 1; }
 
       # The registry matches this against server.json's `name` to prove we own the PyPI
       # package. It fails there, after the release is public — cheaper to fail here.

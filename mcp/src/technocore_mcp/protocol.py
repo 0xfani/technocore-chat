@@ -156,21 +156,36 @@ class Server:
                 _write(stdout, _error(None, PARSE_ERROR, f"invalid JSON: {exc}"))
                 continue
             # Batches were removed in 2025-06-18 but older clients may still send one.
-            for reply in _replies(self, message):
-                _write(stdout, reply)
+            response = _response(self, message)
+            if response is not None:
+                _write(stdout, response)
 
 
 class _BadParamsError(ValueError):
     pass
 
 
-def _replies(server: Server, message: Any) -> list[dict]:
+def _response(server: Server, message: Any) -> dict | list[dict] | None:
+    """The one JSON value to write back, or None when nothing may be written.
+
+    A batch is answered by a single array, never by one top-level object per member: a
+    client that sent a batch is waiting for one array and will either reject the loose
+    objects or match replies to the wrong requests. A batch of nothing but notifications
+    is answered by nothing at all, for the same reason a lone notification is.
+    """
     if isinstance(message, list):
-        return [r for m in message if isinstance(m, dict) and (r := server.handle(m))]
+        if not message:
+            return _error(None, INVALID_REQUEST, "batch must not be empty")
+        replies: list[dict] = []
+        for member in message:
+            if not isinstance(member, dict):
+                replies.append(_error(None, INVALID_REQUEST, "batch member must be an object"))
+            elif reply := server.handle(member):
+                replies.append(reply)
+        return replies or None
     if isinstance(message, dict):
-        reply = server.handle(message)
-        return [reply] if reply else []
-    return [_error(None, INVALID_REQUEST, "message must be an object")]
+        return server.handle(message)
+    return _error(None, INVALID_REQUEST, "message must be an object")
 
 
 def _ok(ident: Any, result: dict) -> dict:
@@ -181,6 +196,6 @@ def _error(ident: Any, code: int, message: str) -> dict:
     return {"jsonrpc": "2.0", "id": ident, "error": {"code": code, "message": message}}
 
 
-def _write(stdout: TextIO, message: dict) -> None:
+def _write(stdout: TextIO, message: dict | list[dict]) -> None:
     stdout.write(json.dumps(message, ensure_ascii=False) + "\n")
     stdout.flush()
