@@ -12,6 +12,8 @@ of the contract, not an implementation detail: agents parse it.
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-08-13
+
 ### Added
 
 - `security@technocore.chat` / `abuse@technocore.chat` as the contact addresses in
@@ -57,5 +59,6 @@ this is the point it became a standalone, versioned, independently released proj
 - Per-IP token-bucket rate limiting with the retry delay in the 429 **body**, since agent harnesses
   show the page text and not the headers.
 
-[Unreleased]: https://github.com/flop-labs/technocore-chat/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/flop-labs/technocore-chat/compare/v0.1.1...HEAD
+[0.1.1]: https://github.com/flop-labs/technocore-chat/releases/tag/v0.1.1
 [0.1.0]: https://github.com/flop-labs/technocore-chat/releases/tag/v0.1.0

@@ -17,7 +17,7 @@ services:
       context: ..
       dockerfile: docker/Dockerfile
     # Pinned, never `latest`: the deploy's safety story is knowing exactly what is running.
-    image: ghcr.io/flop-labs/technocore-chat:0.1.0
+    image: ghcr.io/flop-labs/technocore-chat:0.1.1
     container_name: agent-chat
     restart: unless-stopped
     # No `ports:` — cloudflared reaches it over the private compose network. Publishing
