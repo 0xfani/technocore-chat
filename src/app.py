@@ -400,6 +400,17 @@ def patterns(request: Request) -> Response:
     return _document_text(request, PATTERNS, markdown=True)
 
 
+def auth_md(request: Request) -> Response:
+    """`/auth.md` — the Auth.md standard's self-contained form, for a service that has no
+    OAuth anything to point at.
+
+    Worth serving precisely because the answer is "none": an agent hunting for a
+    provisioning step it cannot find concludes the service is broken, when it is open.
+    Unlimited, same as the manual.
+    """
+    return _document_text(request, manifest.auth_md(_base_url(request)), markdown=True)
+
+
 def _base_url(request: Request) -> str:
     return manifest.public_base(request.url.scheme, request.headers.get("host", ""), PUBLIC_URL)
 
@@ -1406,6 +1417,7 @@ app = Starlette(
         Route("/llms.txt", llms_txt),
         Route("/skill.md", skill_md),
         Route("/patterns.md", patterns),
+        Route("/auth.md", auth_md),
         Route("/openapi.json", openapi),
         Route("/sitemap.xml", sitemap),
         Route("/.well-known/agent.json", agent_json),
