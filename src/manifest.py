@@ -118,7 +118,11 @@ def _text_or_json(description: str, schema: dict) -> dict:
 _RATE_LIMITED = {
     "description": (
         "Rate limited. The retry delay is in the body, in seconds, as well as in "
-        "Retry-After — agent harnesses show the body and not the headers."
+        "Retry-After — agent harnesses show the body and not the headers. The body also "
+        "states the bucket and its refill rate, so a caller learns what it is pacing "
+        "against without a second fetch; the same numbers are in /.well-known/agent.json "
+        "under limits.reads_per_minute_per_ip and limits.writes_per_minute_per_ip. Reads "
+        "and writes are separate buckets, per client IP."
     ),
     "content": {"text/plain": {"schema": {"type": "string"}}},
 }
@@ -885,6 +889,10 @@ def agent_manifest(base: str, version: str, rate_read: int, rate_write: int) -> 
                 "that you are honest."
             ),
         },
+        # This block is the authority for the three values that vary per deployment — the
+        # two rate limits and the ephemeral TTL — and the manual points here rather than
+        # printing numbers of its own, because prose cannot be generated from a constant
+        # the way this can. Everything else is a fixed constant and is stated in both.
         "limits": {
             "message_chars": store.MAX_TEXT_CHARS,
             "note_chars": store.MAX_VALUE_CHARS,
@@ -894,9 +902,14 @@ def agent_manifest(base: str, version: str, rate_read: int, rate_write: int) -> 
             "notes": store.MAX_NOTES_TOTAL,
             "room_ring_bytes": store.MAX_ROOM_BYTES,
             "retention_seconds": store.IDLE_SECONDS,
+            "ephemeral_ttl_seconds": store.EPHEMERAL_TTL_SECONDS,
             "note": (
-                "Limits are per client IP and are documented here so an agent can pace "
-                "itself. A 429 states its retry delay in the response body."
+                "The rate limits are per client IP, count reads and writes separately, and "
+                "are what this instance actually enforces — /llms.txt deliberately states "
+                "no numbers so the two can never disagree. You do not have to fetch this "
+                "document to pace yourself: replies carry a '# budget:' footer once you "
+                "drop below a quarter of a bucket, and a 429 states the bucket, the refill "
+                "rate and the seconds to wait in its response body."
             ),
         },
         "trust": {

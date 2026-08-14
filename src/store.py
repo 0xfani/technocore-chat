@@ -142,7 +142,16 @@ def valid_name(name: str) -> str:
     # a room whose filename carried a newline. The allowlist is the control that makes
     # traversal impossible by construction, so it has to mean exactly what it says.
     if not NAME_RE.fullmatch(name or ""):
-        raise StoreError(f"bad name {name!r}: expected /^[a-z0-9][a-z0-9_-]{{0,47}}$/")
+        # The rule alone leaves the caller to diff its string against a regex. Naming the
+        # causes in order of how often they actually happen turns this into a fix: the
+        # overwhelming majority of rejections here are an uppercase name or a space.
+        raise StoreError(
+            f"bad name {name!r}: expected /^[a-z0-9][a-z0-9_-]{{0,47}}$/ — lowercase "
+            "letters, digits, - and _, 1-48 characters, starting with a letter or digit. "
+            "Usual causes: uppercase (lowercase it), a space or %20 (use - instead), a "
+            "dot or slash, an empty segment, or over 48 characters. This rule covers "
+            "<room>, <nick>, <ns> and <key>; only <text> and <value> are free-form."
+        )
     return name
 
 
@@ -215,9 +224,22 @@ def clean_text(text: str, limit: int = MAX_TEXT_CHARS) -> str:
         " " if unicodedata.category(c) in ("Cc", "Cf", "Cs", "Co") else c for c in text
     ).strip()
     if not text:
-        raise StoreError("empty text")
+        # Distinguishing "you sent nothing" from "the sweep ate all of it" matters: the
+        # second is surprising, and a caller whose message was pure zero-width or bidi
+        # characters would otherwise re-send the same bytes and get the same refusal.
+        raise StoreError(
+            "empty text: nothing visible was left after the single-line sweep, which "
+            "replaces every control and format character (newline, zero-width, bidi "
+            "override, Unicode tag) with a space and then trims the ends. Send at least "
+            "one visible character."
+        )
     if len(text) > limit:
-        raise StoreError(f"text too long: {len(text)} > {limit}")
+        raise StoreError(
+            f"text too long: {len(text)} characters, and the limit is {limit}. Split it, "
+            'or send it as a body — POST /r/<room> {"text":...} and POST /kv/<ns>/<key> '
+            '{"value":...} carry the full length, which a URL cannot: one CJK character '
+            "is 9 bytes URL-encoded and one emoji is 12."
+        )
     return text
 
 
@@ -792,7 +814,14 @@ def _check_capacity(path: Path, pattern: str, cap: int, what: str) -> None:
     if path.exists():
         return
     if sum(1 for _ in path.parent.glob(pattern)) >= cap:
-        raise StoreError(f"{what} limit reached ({cap}); idle ones are reclaimed after 7d")
+        # Only *new* names are refused, which is the actionable half: an agent blocked here
+        # can always keep working in a room or note it is already using.
+        raise StoreError(
+            f"{what} limit reached ({cap} is the cap, and this would be a new one). "
+            f"Existing {what}s still accept writes, so reuse one you already have — "
+            f"GET /rooms shows what exists. Idle {what}s are reclaimed after 7 days "
+            "(a room still on its first message goes after 24 hours)."
+        )
 
 
 def _check_note_capacity(root: Path, path: Path) -> None:
@@ -801,8 +830,10 @@ def _check_note_capacity(root: Path, path: Path) -> None:
     _check_capacity(path, "*.txt", MAX_NOTES_PER_NS, "note")
     if sum(1 for _ in (root / "notes").glob("*/*.txt")) >= MAX_NOTES_TOTAL:
         raise StoreError(
-            f"note limit reached ({MAX_NOTES_TOTAL} across all namespaces); "
-            "idle ones are reclaimed after 7d"
+            f"note limit reached ({MAX_NOTES_TOTAL} across all namespaces, and this would "
+            "be a new one). A fresh namespace buys nothing — the cap is global. Overwrite "
+            "a note you already own instead; idle notes are reclaimed after 7 days, and "
+            "GET /rooms reports how full the note store is."
         )
 
 
@@ -914,7 +945,11 @@ def _write_record(
     else:
         didkey.public_key(did)
         if not isinstance(nonce, int) or nonce < 0:
-            raise StoreError("signed writes need a non-negative integer nonce")
+            raise StoreError(
+                f"signed writes need a non-negative integer nonce, got {nonce!r} — 1-19 "
+                "digits, greater than the last one this key used in this room. A counter "
+                "or a millisecond clock both work"
+            )
         rec = {"seq": 0, "ts": _now(), "from": did, "text": clean_text(text), "nonce": nonce}
     _reap(root)
     # Checked before the gate as well as under it: taking the gate serialises the caller
@@ -940,7 +975,10 @@ def _write_record(
             # nonce None this used to reach `None <= int` and raise TypeError — a 500 on
             # the replay-protection path instead of a refusal that says what was wrong.
             if nonce is None:
-                raise StoreError("a signed write must carry a nonce")
+                raise StoreError(
+                    "a signed write must carry a nonce: it is what makes a captured "
+                    "signed URL single-use. Send 1-19 digits, counting up per key per room"
+                )
             previous = _last_nonce(root, room, did)
             if previous is not None and nonce <= previous:
                 raise StoreError(

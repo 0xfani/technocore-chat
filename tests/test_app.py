@@ -113,6 +113,72 @@ def test_rate_limit_is_actionable_without_headers(client, monkeypatch):
     assert client.get("/r/lobby").status_code == 200  # reads have their own budget
 
 
+def test_the_429_names_the_budget_the_manual_deliberately_does_not(client, monkeypatch):
+    """The numbers are per deployment, so no document states them as prose. That only works
+    if the responses carry them — otherwise removing them from the manual just loses them.
+    """
+    import app as app_module
+
+    monkeypatch.setattr(app_module, "RATE_WRITE", 2)
+    for i in range(3):
+        r = client.get(f"/r/lobby/say/bot/m{i}")
+    assert r.status_code == 429
+    assert "(2/min)" in r.text  # the enforced number, not a documented one
+    assert "one token every 30s" in r.text  # …and the refill, as a sleep
+    # what still works while throttled, and where to read the limits up front
+    assert "reads are a separate budget" in r.text
+    assert "limits.writes_per_minute_per_ip" in r.text
+
+
+def test_the_refill_rate_stays_a_number_an_agent_can_pace_against(client):
+    """`{per_min/60:.1f} tokens/s` prints a flat "0.0 tokens/s" below 30/min — useless on
+    exactly the deployments that throttle hardest. Under 1/s the period is the useful form.
+    """
+    import app as app_module
+
+    assert app_module.refill_rate(120) == "2.0 tokens/s"
+    assert app_module.refill_rate(60) == "1.0 tokens/s"
+    assert app_module.refill_rate(30) == "one token every 2s"
+    assert app_module.refill_rate(1) == "one token every 60s"
+
+
+def test_a_zero_rate_limit_refuses_rather_than_crashing(monkeypatch, tmp_path):
+    """The bucket arithmetic divides by the limit, so CHAT_RATE_WRITE=0 turned every write
+    into a 500 on the limiter itself. Floored at import instead."""
+    monkeypatch.setenv("CHAT_ROOT", str(tmp_path))
+    monkeypatch.setenv("CHAT_RATE_WRITE", "0")
+    for mod in ("app", "store"):
+        sys.modules.pop(mod, None)
+    import app as app_module
+
+    assert app_module.RATE_WRITE == 1
+    assert TestClient(app_module.app).get("/r/lobby/say/bot/hi").status_code == 200
+
+
+def test_every_path_the_429_calls_free_really_is_free(client, monkeypatch):
+    """Advice that fails at the moment it is taken is worse than no advice: a throttled
+    agent following this list must not meet a second 429."""
+    import app as app_module
+
+    monkeypatch.setattr(app_module, "RATE_READ", 1)
+    client.get("/rooms")
+    assert client.get("/rooms").status_code == 429  # the budget really is spent
+
+    named = app_module.FREE_PATHS.replace(" and ", ", ").split(", ")
+    concrete = {
+        "/.well-known/*": [
+            "/.well-known/agent.json",
+            "/.well-known/api-catalog",
+            "/.well-known/ai-catalog.json",
+            "/.well-known/agent-skills/index.json",
+        ]
+    }
+    paths = [p for name in named for p in concrete.get(name.strip(), [name.strip()])]
+    assert len(paths) >= 8
+    for path in paths:
+        assert client.get(path).status_code == 200, f"{path} is advertised as free but is not"
+
+
 def test_budget_warning_appears_before_the_wall(client, monkeypatch):
     import app as app_module
 
@@ -1747,6 +1813,19 @@ def test_stats_does_not_exist_without_a_token(client):
     assert client.get("/stats").status_code == 404
 
 
+def test_the_stats_404_is_byte_identical_to_a_path_that_was_never_routed(stats_client):
+    """The whole point of 404-not-401 is that a prober cannot tell the endpoint from a
+    path that does not exist. A distinctive body would hand that back — which is a live
+    risk now that the generic 404 carries a route map rather than the word "Not Found"."""
+    missing = stats_client.get("/definitely-not-a-route")
+    for probe in (
+        stats_client.get("/stats"),
+        stats_client.get("/stats", headers={"X-Stats-Token": "wrong"}),
+    ):
+        assert probe.status_code == missing.status_code
+        assert probe.text == missing.text
+
+
 def test_stats_404s_a_wrong_token_rather_than_401ing(stats_client):
     """A 401 would confirm the endpoint is there to keep probing."""
     assert stats_client.get("/stats").status_code == 404
@@ -1912,6 +1991,90 @@ def test_stats_serves_the_stored_history_with_the_current_values(stats_client, m
     assert store.snapshots(Path(os.environ["CHAT_ROOT"])) == view["history"]
 
 
+# ---------------------------------------------------------------- errors an agent can act on
+#
+# The shared bar for everything below: a caller that reads only the response body knows
+# what went wrong AND what to send next. A refusal that states only the rule leaves the
+# agent to guess the correction, and guessing costs it the budget the refusal just charged.
+
+
+def test_a_wrong_path_answers_with_the_route_map_rather_than_two_words(client):
+    """Starlette's "Not Found" is the first thing a caller that guessed a URL sees, and it
+    arrives before the agent has read anything. It is the one response that has to carry
+    the whole map."""
+    r = client.get("/room/lobby")  # a plausible guess: the route is /r/<room>
+    assert r.status_code == 404
+    assert "/r/<room>/say/<nick>/<text>" in r.text  # the write lane
+    assert "/kv/<ns>/<key>/set/<value>" in r.text  # the note lane
+    assert "/llms.txt" in r.text and "/openapi.json" in r.text  # where the rest is
+
+
+def test_an_unsupported_verb_is_answered_with_the_get_lane_that_replaces_it(client):
+    """A caller sending DELETE has guessed a REST shape. The correction is a URL, not a
+    verb — every write here is reachable with a plain GET."""
+    r = client.request("DELETE", "/kv/plans/next")
+    assert r.status_code == 405
+    assert "/kv/<ns>/<key>/set/<value>" in r.text
+    assert "append-only" in r.text  # …and why there is nothing to DELETE
+
+
+def test_a_missing_note_says_how_to_create_it(client):
+    """Absent and never-written are the same state, and both are ordinary: a note is
+    created by writing it, so the useful reply is that URL."""
+    r = client.get("/kv/plans/next")
+    assert r.status_code == 404
+    assert "/kv/plans/next/set/" in r.text
+    assert "if_absent=1" in r.text  # the create-only form
+    assert "7 days" in r.text  # …and the other reason a note can be missing
+
+
+def test_a_lost_conditional_write_says_how_to_rebase(client):
+    """409 already carried the current value; carrying it without saying what to do with it
+    left the caller to work out the retry."""
+    client.get("/kv/plans/next/set/first")
+    lost = client.get("/kv/plans/next/set/second?if=nothing-like-this")
+    assert lost.status_code == 409
+    assert "first" in lost.text and "?if=" in lost.text
+
+    # The other branch: ?if= against a note that is not there at all. The correction is the
+    # opposite condition, and saying "it exists" here would be exactly backwards.
+    absent = client.get("/kv/plans/absent/set/x?if=something")
+    assert absent.status_code == 409
+    assert "no note there at all" in absent.text and "if_absent=1" in absent.text
+
+
+def test_a_rejected_name_names_the_usual_causes(client):
+    """The rule alone leaves the caller diffing its string against a regex; uppercase and
+    spaces are almost always the actual cause."""
+    r = client.get("/r/UPPER/say/x/y")
+    assert r.status_code == 400
+    assert "lowercase" in r.text
+    assert "<room>" in r.text and "<nick>" in r.text  # which parameters the rule covers
+
+
+def test_text_that_vanishes_in_the_sweep_says_so(client):
+    """A message of pure zero-width characters is empty *after* the sweep. Told only
+    "empty text", a caller would resend the same bytes."""
+    r = client.get("/r/lobby/say/bot/%E2%80%8B%E2%80%8B")  # two zero-width spaces
+    assert r.status_code == 400
+    assert "single-line sweep" in r.text and "zero-width" in r.text
+
+
+def test_oversized_text_points_at_the_lane_that_would_carry_it(client):
+    """The GET lane is bounded by URL length; the answer is POST, not a shorter message."""
+    r = client.get("/r/lobby/say/bot/" + "x" * 5000)
+    assert r.status_code == 400
+    assert "POST /r/<room>" in r.text and "4096" in r.text
+
+
+def test_a_body_that_is_not_json_says_what_to_send_instead(client):
+    r = client.post("/r/lobby", content=b"text=hello")
+    assert r.status_code == 400
+    assert '{"from":"bot","text":"hello"}' in r.text
+    # …and that the whole body was avoidable: the GET lane needs no JSON at all
+    assert "/r/<room>/say/<nick>/<text>" in r.text
+
+
 # ------------------------------------------- machine-readable metadata (registry-facing)
 
 
@@ -2006,6 +2169,53 @@ def test_openapi_limits_are_the_limits_the_server_enforces(client):
     # …and the version comes from the file that declares it, not a second copy.
     pyproject = (Path(__file__).resolve().parents[1] / "pyproject.toml").read_text()
     assert doc["info"]["version"] in pyproject
+
+
+def test_the_manual_states_no_rate_limit_it_cannot_guarantee(client):
+    """The bug this closes: /llms.txt hardcoded "120 reads and 30 writes per minute" while
+    the enforced values come from CHAT_RATE_READ / CHAT_RATE_WRITE, so any instance that
+    tuned them published a manual that lied — and an agent paces itself to a manual.
+
+    The manual is a constant string, so it cannot carry a per-deployment number correctly.
+    It therefore carries none, and names the document that does.
+    """
+    import app as app_module
+
+    manual = client.get("/llms.txt").text
+    limits = manual[manual.index("LIMITS:") :].split("\n\n")[0]
+
+    # No bare per-minute claim, whatever the configured values happen to be.
+    assert not re.search(r"\d+\s+(reads|writes)\b", limits)
+    assert f"{app_module.RATE_READ} " not in limits and f"{app_module.RATE_WRITE} " not in limits
+    # …and the pointer is a real document with a real field in it.
+    assert "/.well-known/agent.json" in limits
+    assert "limits.reads_per_minute_per_ip" in limits
+    doc = client.get("/.well-known/agent.json").json()
+    assert doc["limits"]["reads_per_minute_per_ip"] == app_module.RATE_READ
+    assert doc["limits"]["writes_per_minute_per_ip"] == app_module.RATE_WRITE
+
+
+def test_the_manifest_publishes_every_limit_that_varies_per_deployment(client):
+    """Three values are configurable, so three values have to be readable from the one
+    document generated at runtime. A pointer to a field that is not there is worse than
+    the hardcoded number it replaced."""
+    import store
+
+    doc = client.get("/.well-known/agent.json").json()
+    assert doc["limits"]["ephemeral_ttl_seconds"] == store.EPHEMERAL_TTL_SECONDS
+    manual = client.get("/llms.txt").text
+    assert "limits.ephemeral_ttl_seconds" in manual
+
+
+def test_the_manual_and_the_429_agree_on_what_costs_nothing(client, monkeypatch):
+    """Two lists of free paths would drift, and the 429's copy is the one an agent reads
+    while it is actually throttled."""
+    import app as app_module
+
+    assert app_module.FREE_PATHS in client.get("/llms.txt").text
+    monkeypatch.setattr(app_module, "RATE_WRITE", 1)
+    client.get("/r/lobby/say/bot/one")
+    assert app_module.FREE_PATHS in client.get("/r/lobby/say/bot/two").text
 
 
 def test_openapi_omits_the_token_gated_stats_endpoint(client):
