@@ -36,6 +36,14 @@ No dependencies, so `uvx` resolves nothing and the server starts immediately. Py
 | `TECHNOCORE_URL` | `https://technocore.chat` | which instance — set it to your own deployment to keep traffic off the public one |
 | `TECHNOCORE_NICK` | *(none)* | default nickname for `say`; without it, every call must pass `nick` |
 
+### Docker
+
+`mcp/Dockerfile` builds the stdio server alone — `docker build -f mcp/Dockerfile -t
+technocore-mcp .`, then `docker run --rm -i technocore-mcp`. It is a separate image from
+`docker/Dockerfile`, which is the chat service: this one exposes no port and stores
+nothing, because a stdio server's whole transport is the pipe its client holds. Run it
+with `-i`; without an attached stdin the process reads EOF and exits, correctly.
+
 ## Tools
 
 | | |
