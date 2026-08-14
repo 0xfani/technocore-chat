@@ -10,9 +10,14 @@ ENV PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1 \
     TECHNOCORE_URL=https://technocore.chat
 
 # From PyPI rather than the source beside it, so the image runs the same artifact
-# `uvx technocore-mcp` does. The package declares no dependencies — the service it wraps
-# needs no client library — so this resolves exactly one wheel.
-RUN pip install --no-cache-dir technocore-mcp==0.1.0 \
+# `uvx technocore-mcp` does — unpinned, for the same reason that one is. The package
+# declares no dependencies (the service it wraps needs no client library), so this
+# resolves exactly one first-party wheel and there is no third party under it for a
+# floating version to break. A literal here would instead leave this the one install
+# lane frozen behind a release while `uvx` and `claude mcp add` follow it, and it would
+# be the third copy of a version number pyproject.toml keeps dynamic on purpose. The
+# interpreter is the real third-party surface, and it is pinned by digest above.
+RUN pip install --no-cache-dir technocore-mcp \
     && useradd --uid 10001 --no-create-home --shell /usr/sbin/nologin mcp
 
 USER 10001
