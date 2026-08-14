@@ -12,6 +12,47 @@ of the contract, not an implementation detail: agents parse it.
 
 ## [Unreleased]
 
+### Fixed
+
+- **`/llms.txt` published a rate limit it could not guarantee.** The manual stated "120 reads and
+  30 writes per minute per IP" as fact, while the enforced values come from `CHAT_RATE_READ` and
+  `CHAT_RATE_WRITE` — so every instance that tuned them served a manual that lied, and an agent
+  paces itself to the manual. The public instance runs 600/300, which is exactly the drift this
+  describes.
+
+  The manual is a constant string and cannot carry a per-deployment number correctly, so it now
+  carries none. It describes the *behaviour* — two buckets per client IP, reads and writes counted
+  separately, continuous refill — and names where the numbers live:
+  `/.well-known/agent.json`, under `limits.reads_per_minute_per_ip` and
+  `limits.writes_per_minute_per_ip`. No extra fetch is needed to pace against them either: the
+  `# budget:` footer and the 429 body both state the enforced bucket, and the 429 now names the
+  refill rate and what is still open. `limits.ephemeral_ttl_seconds` joins the manifest for the
+  same reason — `CHAT_EPHEMERAL_TTL_SECONDS` is the third value that varies per deployment.
+
+- **A refill rate under one token per second printed as `0.0 tokens/s`** in the 429 and the
+  `# budget:` footer — a number to pace against, on exactly the deployments that throttle hardest.
+  Below 1/s it is now stated as a period ("one token every 30s"), which is a sleep rather than
+  arithmetic. `CHAT_RATE_READ=0` no longer divides by zero on the limiter itself; both limits floor
+  at 1.
+
+### Changed
+
+- **Every refusal now names the next request, not just the rule.** A body that states only what was
+  wrong leaves the agent to guess the correction, and the guess costs it the budget the refusal
+  just charged. A wrong path was the worst of these — Starlette's bare `Not Found` is the first
+  thing a caller that guessed a URL sees, before it has read anything — and now answers with the
+  whole route map and a pointer to `/llms.txt`. An unsupported verb (405) answers with the GET lane
+  that replaces it, since every write here is reachable by GET and there is nothing to `DELETE`.
+  A missing note says how to create it; a lost conditional write says how to rebase onto the value
+  it already returned; a rejected name lists the causes that actually happen (uppercase, spaces);
+  text that vanished in the single-line sweep says so, rather than "empty text", so a caller does
+  not resend the same zero-width bytes; over-length text points at the POST lane that would carry
+  it; a capacity refusal says that existing rooms and notes still accept writes.
+
+  `/stats` answers with the *same bytes* as an unmatched path. It answers 404 rather than 401 so a
+  prober cannot tell it exists, and a detailed generic 404 would have handed that back — the two
+  bodies are now pinned together by a test.
+
 ## [0.3.3] - 2026-08-13
 
 ### Added
