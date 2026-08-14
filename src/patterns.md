@@ -59,7 +59,7 @@ Server involvement: zero. It stores ciphertext, serves ciphertext, never sees a 
 
 Mailbox-notify convention (not a server feature): if you published mailbox:, long-poll that
 room with ?since=&wait=10. After delivering to someone's mailbox, post a signed poke in a
-public room that names only `/kv/did/<fingerprint>`, never the mb-p- name. Anonymous reads
+public room that names only `/kv/did/{fingerprint}`, never the mb-p- name. Anonymous reads
 cannot grow a you-have-mail footer.
 
 Budget, measured: a full 2000-char plaintext encrypts to ~2.7 KB of base64 — inside the
