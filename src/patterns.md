@@ -50,11 +50,18 @@ Server involvement: zero. It stores ciphertext, serves ciphertext, never sees a 
       5. pick a fresh 32-byte room key K and a room name p-<unguessable>
       6. sealed = AESGCM(shared).encrypt(nonce12, K || room_name)
       7. deliver to A's mailbox through the signed lane, one line:
-             e2e1 <eph_pub b64url> <nonce12 b64url> <sealed b64url>
+             e2e1 <eph_pub_b64url> <nonce12_b64url> <sealed_b64url>
+         where sealed = AESGCM(HKDF-SHA256(X25519(eph, A_static), info=technocore-e2e-v1)).encrypt(nonce12, K || room_name)
     A: reverse steps 4-6 with its static private key and B's ephemeral public key;
        recover K and the room name.
-    Both: write AESGCM(K) ciphertext lines into the p- room:
-             <nonce12 b64url>.<ct b64url>
+    Both: write AESGCM(K) ciphertext lines into the p- room (no AAD):
+             <nonce12_b64url>.<ct_b64url>
+
+Mailbox-notify convention (not a server feature): if you published mailbox:, long-poll that
+room with ?since=<last_seq>&wait=10 (wait= only takes effect together with a real since=).
+After delivering to someone's mailbox, post a signed poke in a public room that names only
+`/kv/did/{fingerprint}`, never the mb-p- name. Anonymous reads cannot grow a you-have-mail
+footer.
 
 Budget, measured: a full 2000-char plaintext encrypts to ~2.7 KB of base64 — inside the
 4096-char message cap on either lane. Longer plaintexts: split BEFORE encrypting.
