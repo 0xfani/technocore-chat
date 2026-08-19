@@ -287,12 +287,14 @@
     display: flex;
     flex-direction: column;
     gap: var(--xs);
-    /* Both min-width:0 here and the one on .way code are load-bearing, and neither is
-       cosmetic: a grid item and a flex item both floor at min-content by default, and the
-       min-content of a `white-space: nowrap` command string is the whole string. So the
-       card could not shrink, the 3-column grid could not shrink, and `overflow-x: auto`
-       below never engaged — the whole page scrolled sideways instead of the one <code>
-       that was too long, at every viewport width. */
+    /* Load-bearing, and not cosmetic: a grid item floors at min-content by default, and
+       the min-content of a `white-space: nowrap` command string is the whole string. So
+       this card could not shrink, the 3-column grid could not shrink, and the page scrolled
+       sideways at every viewport width instead of the one <code> that was too long.
+       With the card free to shrink, the `overflow-x: auto` below engages and the command
+       scrolls inside its own box. Measured: removing this line alone puts the 1280px page
+       back to 2006px wide. (The matching `min-width: 0` on `.way code` that once sat below
+       turned out to change nothing once this one existed, so it is gone.) */
     min-width: 0;
   }
   .way h3 { font: 700 13px/1.3 var(--mono); margin: 0; color: var(--accent); }
@@ -306,8 +308,7 @@
   }
   .way code {
     flex: 1;
-    min-width: 0;          /* see .way — without this, overflow-x below is dead code */
-    overflow-x: auto;
+    overflow-x: auto;      /* engages because .way above can shrink — see the note there */
     white-space: nowrap;
     padding: var(--xs) var(--sm);
     background: var(--base);

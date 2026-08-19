@@ -321,6 +321,78 @@ def test_stats_says_whether_per_ip_limits_are_actually_per_ip(client, monkeypatc
     assert ident["distinct_identities"] == 1  # ...seen as one
 
 
+def test_the_post_lanes_do_not_block_the_event_loop(client, monkeypatch):
+    """A POST must not stall every *other* request while it touches disk.
+
+    room_post and note_post are `async def` — they have to await the request body — so any
+    blocking store call they make runs on the event loop rather than in the threadpool
+    Starlette gives a sync endpoint for free. That is not theoretical: against a full store
+    one POST made every other in-flight request wait ~385 ms, measured with a /healthz
+    probe (tests/capacity_bench.py reproduces it).
+
+    Rather than build a full store, this makes one store call slow and asks whether an
+    unrelated route can still be served while it runs. /healthz touches no disk, so any
+    latency it sees here is the loop being unavailable.
+    """
+    import asyncio
+    import time
+
+    from httpx2 import ASGITransport, AsyncClient
+
+    import app as app_module
+
+    def slowed(fn):
+        def wrapper(*args, **kwargs):
+            time.sleep(0.5)  # stands in for flock + fsync + a reap pass
+            return fn(*args, **kwargs)
+
+        return wrapper
+
+    # Both async lanes, because they are the same mistake in two places and a fix applied
+    # to only one of them should still fail this.
+    monkeypatch.setattr(app_module.store, "append", slowed(app_module.store.append))
+    monkeypatch.setattr(app_module.store, "note_set", slowed(app_module.store.note_set))
+
+    # A heartbeat, not a single timed request. Timing one request racing the POST measures
+    # nothing: a blocking call stalls the loop's *timers* too, so the sleep meant to line
+    # the two up only resumes once the block is over and the request that follows it is
+    # served promptly. Sampling continuously is what shows the gap.
+    async def race() -> tuple[float, int]:
+        gaps: list[float] = []
+        done = asyncio.Event()
+
+        async def heartbeat() -> None:
+            last = time.perf_counter()
+            while not done.is_set():
+                await asyncio.sleep(0.01)
+                now = time.perf_counter()
+                gaps.append(now - last)
+                last = now
+
+        beat = asyncio.create_task(heartbeat())
+        await asyncio.sleep(0.03)  # let it tick once before the request, so gaps is seeded
+        async with AsyncClient(
+            transport=ASGITransport(app=app_module.app), base_url="http://t"
+        ) as c:
+            posted = await c.post("/r/lobby", json={"from": "bot", "text": "hi"})
+            noted = await c.post("/kv/ns/k", json={"value": "v"})
+        done.set()
+        await beat
+        # Empty means the loop never ran the heartbeat *once* across both requests, which is
+        # the most blocked it can possibly be — not a reason to raise ValueError from max().
+        return (max(gaps) if gaps else float("inf")), min(posted.status_code, noted.status_code)
+
+    stall, status = asyncio.run(race())
+    assert status == 200
+    # The POST itself takes 0.5s either way. The question is only whether the loop was
+    # available during it, so the threshold sits far below that and far above a scheduling
+    # hiccup: blocked measures ~0.5s, threadpooled ~0.01s.
+    assert stall < 0.2, (
+        f"the event loop went unserved for {stall * 1000:.0f} ms during one POST — its "
+        "store call is running on the loop instead of in run_in_threadpool"
+    )
+
+
 def test_junk_query_params_never_500(client):
     """A harness that mangles a URL must get the default view, not a stack trace."""
     client.get("/r/lobby/say/bot/hi")
