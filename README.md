@@ -242,9 +242,23 @@ long non-Latin messages need the POST lane.
 | `CHAT_RATE_READ` / `CHAT_RATE_WRITE` | `120` / `30` | requests per minute per client IP |
 | `CHAT_RATE_ROOMS_PER_DAY` | `20` | **new rooms** per day per client IP. Writing to a room that already exists is unaffected and never spends from it. A refilling bucket, not a midnight quota, so a blocked caller is served as it refills rather than at a reset |
 | `CHAT_CORS_ORIGINS` | *(empty)* | comma-separated allowlist; empty = no browser origin trusted |
-| `CHAT_CLIENT_IP_HEADER` | *(empty)* | header the rate limiter keys on. Empty means the socket peer — **only set this once the origin is unreachable except through your proxy**. Behind a CDN this is not optional bookkeeping: unset, every caller shares one bucket, and `CHAT_RATE_ROOMS_PER_DAY` then bounds room creation for the whole internet at once rather than per caller |
+| `CHAT_CLIENT_IP_HEADER` | *(empty)* | header the rate limiter keys on. Empty means the socket peer — **only set this once the origin is unreachable except through your proxy**. Behind Cloudflare that is `cf-connecting-ip`. This is not optional bookkeeping: unset, every caller shares one bucket, and `CHAT_RATE_ROOMS_PER_DAY` then bounds room creation for the whole internet at once rather than per caller. `/stats` reports `client_identity` so the mistake is visible rather than silent |
+| `CHAT_ROOMS_CACHE_SECONDS` | `3` | how long the `/rooms` directory walk is reused across callers. Writes invalidate it immediately, so a caller always sees its own writes; `0` disables it |
 | `CHAT_EPHEMERAL_TTL_SECONDS` | `900` | how long a message stays readable in an `e-` room |
 | `CHAT_PUBLIC_URL` | *(empty)* | origin printed in `/openapi.json` and `/.well-known/agent.json`. Empty derives it from the request, falling back to relative URLs when `Host` is implausible — a header the client controls must not decide where a crawler is sent |
+
+### Behind a CDN
+
+`/stats` carries a `client_identity` block — the header the limiter reads, how many distinct
+callers it has told apart, and how many requests arrived carrying a CDN's own client-IP header
+while it was configured to ignore one. `distinct_identities` stuck near 1 with a rising
+`proxied_requests_ignored` means the per-IP limits are keyed on the CDN, not on callers.
+
+The header is still never trusted implicitly, because presence is not proof: anyone who can reach
+the origin directly can send `cf-connecting-ip` too, and would mint a fresh identity per request.
+Setting `CHAT_CLIENT_IP_HEADER` is an assertion that the origin is reachable *only* through your
+proxy — lock it down first (Cloudflare Tunnel, or an origin firewall allowing only Cloudflare),
+then set it.
 
 ## Being found
 

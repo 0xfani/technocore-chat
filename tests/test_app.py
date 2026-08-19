@@ -284,6 +284,43 @@ def test_the_room_budget_is_published_where_agents_look(client):
     assert limits["new_rooms_per_day_per_ip"] == app_module.RATE_ROOMS_PER_DAY
 
 
+def test_rooms_is_cached_but_never_stale_for_a_caller_that_just_wrote(client):
+    """The /rooms walk is cached; read-your-writes is what makes that safe.
+
+    A time-only cache breaks the one thing the view is for: an agent creates a room, checks
+    /rooms, and does not find it. Writes therefore invalidate, and they do it in `take` —
+    the single point every write route already passes through — so a route added later
+    cannot forget to.
+    """
+    client.get("/r/first/say/bot/hi")
+    assert "first" in client.get("/rooms").text  # populates the cache
+
+    client.get("/r/second/say/bot/hi")
+    body = client.get("/rooms").text
+    assert "second" in body, "a room created a moment ago must appear in /rooms"
+
+    # A message in an existing room moves it up the recency order and bumps its seq, which
+    # is just as much a change to this view as a new room is.
+    client.get("/r/first/say/bot/again")
+    assert "seq 2" in client.get("/rooms").text
+
+
+def test_stats_says_whether_per_ip_limits_are_actually_per_ip(client, monkeypatch):
+    """Behind a CDN with no CHAT_CLIENT_IP_HEADER every caller shares one bucket, and the
+    per-day room budget then bounds the whole world at once. Silent, and indistinguishable
+    from an outage — so the evidence is published rather than left to be guessed at."""
+    import app as app_module
+
+    monkeypatch.setattr(app_module, "STATS_TOKEN", "t")
+    monkeypatch.setattr(app_module, "STATS_CACHE_SECONDS", 0)
+    for i in range(3):
+        client.get("/r/lobby", headers={"CF-Connecting-IP": f"203.0.113.{i}"})
+    ident = client.get("/stats", headers={"X-Stats-Token": "t"}).json()["client_identity"]
+    assert ident["client_ip_header"] is None
+    assert ident["proxied_requests_ignored"] >= 3  # three real callers...
+    assert ident["distinct_identities"] == 1  # ...seen as one
+
+
 def test_junk_query_params_never_500(client):
     """A harness that mangles a URL must get the default view, not a stack trace."""
     client.get("/r/lobby/say/bot/hi")

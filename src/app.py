@@ -93,12 +93,29 @@ CORS_ORIGINS = [o for o in os.environ.get("CHAT_CORS_ORIGINS", "").split(",") if
 # proxy rule cannot silently publish the numbers.
 STATS_TOKEN = os.environ.get("CHAT_STATS_TOKEN", "")
 STATS_CACHE_SECONDS = int(os.environ.get("CHAT_STATS_CACHE_SECONDS", "60"))
+# /rooms walks every room for size and mtime and every note for the capacity line — at the
+# caps that is ~46k stat calls, and it was doing it per request. It is also the most polled
+# read on the service: /humans refreshes it every 5s per open tab, and it is how an agent
+# discovers what exists. Nothing in it is per-caller, so N pollers within the window can
+# share one walk. Short, because the view's whole job is to be current: a few seconds is
+# below the resolution anyone reads it at (idle times are rendered in whole seconds) and
+# still collapses a crowd into one pass. 0 disables it.
+ROOMS_CACHE_SECONDS = float(os.environ.get("CHAT_ROOMS_CACHE_SECONDS", "3"))
 # Empty by default, and that default is a security property rather than a convenience.
 # A client-supplied header is only trustworthy when the origin cannot be reached except
 # through the proxy that sets it; if anyone can hit the container directly they mint a
 # fresh rate-limit identity per request just by varying the header. Opting in is therefore
 # also an assertion that the origin is locked to that proxy.
 CLIENT_IP_HEADER = os.environ.get("CHAT_CLIENT_IP_HEADER", "").strip().lower()
+# Headers a CDN sets and overwrites on every request. Their *presence* is not permission to
+# trust them — a direct caller can send any of them, which is the whole reason
+# CLIENT_IP_HEADER is opt-in — but it does mean the request plausibly arrived through that
+# CDN, and if we are not configured to read one, every caller behind it shares a single
+# rate-limit identity. That failure is silent and it gets worse the longer the budget: a
+# shared per-minute limit merely feels strict, a shared per-DAY room budget is a global
+# lockout nobody can distinguish from "the service is broken". So the mismatch is counted
+# and published in /stats rather than guessed at. Detection, not trust.
+PROXY_IP_HEADERS = ("cf-connecting-ip", "x-forwarded-for", "x-real-ip", "true-client-ip")
 # The origin to print in /openapi.json and /.well-known/agent.json. Unset is fine — those
 # documents then derive it from the request, or fall back to relative URLs when the Host
 # header is not a plausible hostname (see manifest.public_base). Set it when the service
@@ -164,6 +181,14 @@ _buckets: OrderedDict[tuple[str, str], tuple[float, float]] = OrderedDict()
 # sits beside it here, not a number that outlives the process it describes.
 _requests: dict[str, int] = {"read": 0, "write": 0, "rate_limited": 0}
 _started = time.time()
+# Two numbers that together say whether per-IP limits are actually per-IP. `proxied` counts
+# requests that carried a CDN header we are not configured to read; `identities` is how many
+# distinct client IPs the limiter has ever keyed on. A busy service showing a high `proxied`
+# and an `identities` of 1 is not rate limiting anyone individually — it is rate limiting
+# the CDN, and the room budget is being shared by the entire internet.
+_proxy_evidence: dict[str, int] = {"proxied_requests": 0}
+_identities: set[str] = set()
+MAX_IDENTITIES = 50_000  # bounded like _buckets; a counter that OOMs is not a diagnostic
 
 
 def client_ip(request: Request) -> str:
@@ -188,6 +213,11 @@ def client_ip(request: Request) -> str:
         forwarded = request.headers.get(CLIENT_IP_HEADER, "").split(",")[0].strip()
         if forwarded:
             return forwarded
+        return request.client.host if request.client else "?"
+    # Not configured to read one. Note whether the request looks proxied anyway, so a
+    # misconfiguration is visible in /stats instead of only in a support ticket.
+    if any(h in request.headers for h in PROXY_IP_HEADERS):
+        _proxy_evidence["proxied_requests"] += 1
     return request.client.host if request.client else "?"
 
 
@@ -205,6 +235,8 @@ def take(
     tokens, which never reaches the 1.0 a grant costs — the limit would refuse everything.
     """
     ip = client_ip(request)
+    if len(_identities) < MAX_IDENTITIES:
+        _identities.add(ip)
     now = time.monotonic()
     cap = float(per_min if burst is None else burst)
     tokens, last = _buckets.get((ip, kind), (cap, now))
@@ -222,6 +254,15 @@ def take(
     # route cannot forget to count itself. In-process, so these reset on restart — /stats
     # reports them next to `uptime_seconds`, which is what makes them readable.
     _requests[kind] = _requests.get(kind, 0) + 1
+    # And invalidated here for the same reason. A time-only /rooms cache breaks
+    # read-your-writes: an agent that creates a room and then checks /rooms would not find
+    # it for the length of the window, which is the one thing that view is for. Every write
+    # route passes through here before touching the store, so hooking it here cannot be
+    # forgotten by a route added later — the alternative was hooking nine call sites.
+    # Deliberately keyed off the *attempt*: invalidating after a write that then failed
+    # costs one extra walk and is never wrong, whereas missing one serves a stale answer.
+    if kind == "write":
+        _rooms_cache.clear()
     if wait:
         _requests["rate_limited"] += 1
     return int(tokens), wait
@@ -624,12 +665,26 @@ def _size(n: int) -> str:
     return f"{n}B"
 
 
-def rooms(request: Request) -> Response:
-    left, retry = take(request, "read", RATE_READ)
-    if retry:
-        return limited("read", RATE_READ, retry)
-    q = request.query_params
-    view = store.room_stats(ROOT, limit=_cursor(q.get("limit"), 50))
+# Keyed by limit, because the limit changes how much work the walk does and therefore what
+# the answer contains. Bounded by construction: _cursor clamps to 0..MAX_LIMIT, so this
+# holds at most a couple of hundred entries even if every caller asks for a different one.
+_rooms_cache: OrderedDict[int, tuple[float, dict]] = OrderedDict()
+MAX_ROOMS_CACHE = 64
+
+
+def _rooms_view(limit: int) -> dict:
+    """The /rooms payload for `limit`, from cache when one is fresh.
+
+    Deliberately caching the *store walk* and not the rendered response: the text and JSON
+    renderings differ, and the budget footer is per-caller, so a response cache would have
+    to key on both and would still be wrong for the footer.
+    """
+    now = time.monotonic()
+    if ROOMS_CACHE_SECONDS > 0:
+        hit = _rooms_cache.get(limit)
+        if hit and now - hit[0] < ROOMS_CACHE_SECONDS:
+            return hit[1]
+    view = store.room_stats(ROOT, limit=limit)
     # Notes had no capacity surface at all: /kv/<ns> lists one namespace and namespaces are
     # unenumerable by design, so nothing showed how full the global note cap was. Aggregate
     # only — see store.note_stats for why a per-namespace breakdown must never appear here.
@@ -640,6 +695,20 @@ def rooms(request: Request) -> Response:
     view["engagement"]["windowed_note_to_message_ratio"] = (
         round(view["notes"]["total"] / seen, 4) if seen else None
     )
+    if ROOMS_CACHE_SECONDS > 0:
+        _rooms_cache[limit] = (now, view)
+        _rooms_cache.move_to_end(limit)
+        while len(_rooms_cache) > MAX_ROOMS_CACHE:
+            _rooms_cache.popitem(last=False)
+    return view
+
+
+def rooms(request: Request) -> Response:
+    left, retry = take(request, "read", RATE_READ)
+    if retry:
+        return limited("read", RATE_READ, retry)
+    q = request.query_params
+    view = _rooms_view(_cursor(q.get("limit"), 50))
     notes_line = (
         f"# notes {view['notes']['total']} of {view['notes']['capacity']} "
         f"({_size(view['notes']['bytes'])} total, namespaces not listed)"
@@ -657,6 +726,7 @@ def rooms(request: Request) -> Response:
         # One line, not a column: the per-room numbers are on ?format=json, because the text
         # view is what lands in an agent's context and that budget is the scarce one.
         e = view["engagement"]
+        seen = e["windowed_messages"]
         body = "\n".join(
             [head]
             + [
@@ -1011,14 +1081,27 @@ async def room_post(request: Request) -> Response:
         signer = _signer(did, sig, nonce, f"{room}|{nonce}|{body}")
         if isinstance(signer, Response):
             return signer
-    denied = _room_write_gate(request, room, signer)
-    if denied:
-        return denied
-    if signer is None:
-        rec = store.append(ROOT, room, str(payload.get("from", "")), str(payload.get("text", "")))
-    else:
-        rec = store.append(ROOT, room, "", body, did=signer, nonce=int(nonce))
-    return respond(request, {**store.read_messages(ROOT, room, limit=20), "posted": rec})
+
+    # Everything below is blocking disk work: the gate stats the room and walks the rooms
+    # directory, the append takes an flock and fsyncs, and the reaper may run inside it.
+    # This handler is `async def` because it has to await the request body, so calling that
+    # work directly ran it *on the event loop* — at a full store one POST made every other
+    # request in flight wait ~385 ms, measured with a /healthz probe. The GET write lanes
+    # never had this problem: they are `def`, and Starlette already runs a sync endpoint in
+    # a threadpool. This puts the POST lanes where the GET lanes always were.
+    def write() -> Response:
+        denied = _room_write_gate(request, room, signer)
+        if denied:
+            return denied
+        if signer is None:
+            posted = store.append(
+                ROOT, room, str(payload.get("from", "")), str(payload.get("text", ""))
+            )
+        else:
+            posted = store.append(ROOT, room, "", body, did=signer, nonce=int(nonce))
+        return respond(request, {**store.read_messages(ROOT, room, limit=20), "posted": posted})
+
+    return await run_in_threadpool(write)
 
 
 def note_read(request: Request) -> Response:
@@ -1248,28 +1331,28 @@ async def note_post(request: Request) -> Response:
         signer = _signer(did, sig, nonce, f"{ns}|{key}|{nonce}|{value}")
         if isinstance(signer, Response):
             return signer
-    denied = _note_write_gate(ns, key, value, signer)
-    if denied:
-        return denied
-    if signer is not None:
-        denied = _burn_nonce(key, nonce)
+    expect, expect_absent = _condition(payload)
+
+    # Off the event loop, for the reason spelled out in room_post: the note gate reads a
+    # note, the nonce burn is a compare-and-swap on disk, and note_set walks the notes tree
+    # to enforce the global cap. None of that may run on the loop from an `async def`.
+    def write() -> Response:
+        denied = _note_write_gate(ns, key, value, signer)
         if denied:
             return denied
-    expect, expect_absent = _condition(payload)
-    meta = store.note_set(
-        ROOT,
-        ns,
-        key,
-        value,
-        expect=expect,
-        expect_absent=expect_absent,
-    )
-    return respond(
-        request,
-        meta,
-        f"ok {meta['ns']}/{meta['key']} {meta['bytes']}B {meta['ts']}",
-        budget_note("write", left, RATE_WRITE),
-    )
+        if signer is not None:
+            burned = _burn_nonce(key, nonce)
+            if burned:
+                return burned
+        meta = store.note_set(ROOT, ns, key, value, expect=expect, expect_absent=expect_absent)
+        return respond(
+            request,
+            meta,
+            f"ok {meta['ns']}/{meta['key']} {meta['bytes']}B {meta['ts']}",
+            budget_note("write", left, RATE_WRITE),
+        )
+
+    return await run_in_threadpool(write)
 
 
 def note_list(request: Request) -> Response:
@@ -1372,6 +1455,21 @@ async def stats(request: Request) -> Response:
             "room_bytes": store.MAX_ROOM_BYTES,
             "read_per_min": RATE_READ,
             "write_per_min": RATE_WRITE,
+            "new_rooms_per_day": RATE_ROOMS_PER_DAY,
+            "room_bytes_total": store.MAX_TOTAL_ROOM_BYTES,
+        },
+        # Whether "per IP" is true on this deployment. `client_ip_header` is what the
+        # limiter reads; `distinct_identities` is how many callers it has ever told apart;
+        # `proxied_requests_ignored` counts requests that arrived with a CDN's own client-IP
+        # header while we were configured to ignore it. High proxied count with
+        # distinct_identities near 1 means every caller is sharing one bucket — including
+        # the per-day room budget, which then bounds the whole world at once. Fix by
+        # pointing CHAT_CLIENT_IP_HEADER at the header your proxy overwrites (Cloudflare:
+        # cf-connecting-ip), and only once the origin is unreachable except through it.
+        "client_identity": {
+            "client_ip_header": CLIENT_IP_HEADER or None,
+            "distinct_identities": len(_identities),
+            "proxied_requests_ignored": _proxy_evidence["proxied_requests"],
         },
     }
     return Response(
