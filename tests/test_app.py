@@ -222,6 +222,66 @@ def test_room_disk_is_capped_independently_of_the_room_count(tmp_path, monkeypat
     assert "still fine" in store.room_path(tmp_path, "room0").read_text()
 
 
+def test_the_byte_budget_bounds_growth_and_not_only_creation(tmp_path, monkeypatch):
+    """Rooms made while usage is low must not then grow past the budget.
+
+    Gating creation alone left the documented bound false: create every room while the
+    store is nearly empty, then fill each to its ring, and the total lands at
+    MAX_ROOMS * MAX_ROOM_BYTES — ten times what the operator provisioned. Growing a room
+    means appending to it, so the append is where the budget has to bite.
+    """
+    import store
+
+    monkeypatch.setattr(store, "MAX_ROOM_BYTES", 8192)
+    monkeypatch.setattr(store, "COMPACT_KEEP_BYTES", 4096)
+    monkeypatch.setattr(store, "MAX_TOTAL_ROOM_BYTES", 12_000)
+    monkeypatch.setattr(store, "RESERVED_ROOM_BYTES", 2048)
+
+    # Created early, while there is no pressure at all: both are allowed to exist.
+    for room in ("first", "second"):
+        store.append(tmp_path, room, "bot", "seed")
+
+    def fill(room: str) -> int:
+        for _ in range(40):
+            store.append(tmp_path, room, "bot", "x" * 300)
+        return store.room_path(tmp_path, room).stat().st_size
+
+    # No pressure yet, so the full ring is available.
+    assert fill("first") > store.RESERVED_ROOM_BYTES
+
+    # Now make the budget look spent, as a reap pass would have recorded it, and keep
+    # writing. The room that receives the writes yields back to its guaranteed floor.
+    (tmp_path / store.USAGE_FILE).write_text(str(store.MAX_TOTAL_ROOM_BYTES + 1))
+    assert fill("second") <= store.RESERVED_ROOM_BYTES
+    assert fill("first") <= store.RESERVED_ROOM_BYTES, "an existing large room must yield too"
+
+    # And the floor still holds a conversation rather than truncating to nothing.
+    view = store.read_messages(tmp_path, "first", limit=5)
+    assert view["messages"], "compaction must never empty a room"
+
+
+def test_the_reaper_records_room_usage_for_the_ring_to_read(tmp_path, monkeypatch):
+    """The append path reads a cached total rather than walking every room per write, so
+    something has to keep that total honest. The reaper already walks the tree."""
+    import store
+
+    assert store.room_bytes_used(tmp_path) == 0  # nothing recorded yet reads as no pressure
+
+    monkeypatch.setattr(store, "REAP_EVERY", 0)  # a pass on every write, not once per 300s
+    store.append(tmp_path, "somewhere", "bot", "hi")
+    store.append(tmp_path, "somewhere", "bot", "again")  # this pass sees the room on disk
+    before = store.room_bytes_used(tmp_path)
+    assert before > 0
+
+    for _ in range(20):
+        store.append(tmp_path, "somewhere", "bot", "x" * 200)
+    assert store.room_bytes_used(tmp_path) > before
+
+    # The lag is deliberate and it fails open: the reap that runs before a store's first
+    # room exists records 0, and a missing file reads as 0, so pressure is never invented.
+    # Overshoot is one interval of writes, which the rate limiter already bounds.
+
+
 def test_every_room_can_still_carry_a_topic_and_an_owner(tmp_path, monkeypatch):
     """MAX_NOTES_PER_NS = MAX_ROOMS is only true if the *global* note cap can cover it.
 
@@ -275,6 +335,57 @@ def test_writing_to_an_existing_room_never_spends_the_room_budget(client, monkey
         assert client.get(f"/r/only/say/bot/msg{i}").status_code == 200
     assert client.get("/r/second/say/bot/hi").status_code == 200  # the 2nd and last
     assert client.get("/r/third/say/bot/hi").status_code == 429
+
+
+def test_only_the_request_that_creates_a_room_pays_for_it(client, monkeypatch):
+    """The gate charges before the write, so racing first-writers all pay; only one creates.
+
+    Agents converging on a shared rendezvous room is a documented pattern, so a swarm
+    behind one NAT could otherwise spend a whole day's budget opening a single room. The
+    loser appends to a room that exists by the time it gets through, and is refunded.
+    """
+    import app as app_module
+
+    monkeypatch.setattr(app_module, "RATE_ROOMS_PER_DAY", 3)
+
+    # The race, made deterministic: the first two gate checks both see the room as absent,
+    # which is exactly what two concurrent first-writers see. Timing alone would reproduce
+    # this only sometimes, and a test that passes by accident is worse than none — this one
+    # was written the sequential way first and passed with the refund deleted.
+    real = app_module._room_exists
+    seen = {"n": 0}
+
+    def racing(room: str) -> bool:
+        seen["n"] += 1
+        return False if seen["n"] <= 2 else real(room)
+
+    monkeypatch.setattr(app_module, "_room_exists", racing)
+
+    for _ in range(3):
+        assert client.get("/r/rendezvous/say/bot/hi").status_code == 200
+
+    # One creation happened, so one token is spent: the loser appended to a room that
+    # already existed (seq 2) and got its token back. Two of three left = two more rooms.
+    assert client.get("/r/second-room/say/bot/hi").status_code == 200
+    assert client.get("/r/third-room/say/bot/hi").status_code == 200
+    assert client.get("/r/fourth-room/say/bot/hi").status_code == 429
+
+
+def test_the_served_manual_states_the_caps_it_actually_enforces(client):
+    """/llms.txt tells agents it is the complete protocol, so a number in it that disagrees
+    with the enforced constant is worse than no number. Prose said "512 rooms, 4096 notes"
+    for a whole release after the caps moved underneath it — nothing catches that except
+    generating the numbers, and nothing keeps them generated except this."""
+    import store
+
+    manual = client.get("/llms.txt").text
+    assert f"at most {store.MAX_ROOMS} rooms" in manual
+    assert f"{store.MAX_NOTES_TOTAL} notes in total" in manual
+    assert f"{store.MAX_NOTES_PER_NS} per\nnamespace" in manual
+    assert f"{store.MAX_TOTAL_ROOM_BYTES >> 30} GiB" in manual
+    assert f"~{store.MAX_ROOM_BYTES >> 20} MiB" in manual
+    # and the stale literals are gone
+    assert "at most 512 rooms" not in manual and "4096 notes" not in manual
 
 
 def test_the_room_budget_is_published_where_agents_look(client):

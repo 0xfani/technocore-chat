@@ -58,6 +58,28 @@ MAX_ROOMS = 5120
 # Raising it, or MAX_ROOM_BYTES, is what needs re-checking against the volume now —
 # raising MAX_ROOMS no longer does.
 MAX_TOTAL_ROOM_BYTES = 5 << 30
+# The budget above is only a real bound if rooms cannot grow past it after they are made.
+# Gating *creation* alone does not do that: 5120 rooms created while usage is low can each
+# then grow to MAX_ROOM_BYTES, which is 51 GiB — ten times the number the operator was told
+# to provision. So the ring itself yields under pressure. Every room is guaranteed this
+# much; above it a room keeps up to MAX_ROOM_BYTES only while the service has headroom, and
+# compacts back to its guaranteed floor on the next append once the budget is spent.
+#
+# That is what closes the hole, because growing a room *requires appending to it*: the
+# write that would push a room past its floor is the same write that compacts it. Rooms
+# already large when the budget is reached stay large until they are written to or reaped,
+# but they were counted in the budget that triggered this, so the total does not climb.
+# Overshoot is one refresh interval of writes, and writes are rate limited.
+#
+# = MAX_TOTAL_ROOM_BYTES // MAX_ROOMS on purpose: the floor times the cap is the budget, so
+# even the worst case — every room at its floor — lands exactly on the number.
+RESERVED_ROOM_BYTES = MAX_TOTAL_ROOM_BYTES // MAX_ROOMS
+# Total room bytes as of the last reap pass. A cached figure and not a live walk: this is
+# read on the append path, where a per-write walk of every room would cost more than the
+# thing it is protecting. The reaper already walks the tree on a timer, so refreshing it
+# there is free, and a stale-by-one-interval number is fine for a bound whose overshoot is
+# bounded by the rate limiter anyway.
+USAGE_FILE = ".usage"
 # = MAX_ROOMS on purpose: the reserved namespaces (topic, room-owners, room-allow,
 # room-nonce) hold at most one note per room, so this equality is the invariant that lets
 # EVERY room carry a topic and an owner. Raising MAX_ROOMS raises this with it.
@@ -757,6 +779,16 @@ def _reap(root: Path) -> None:
                 continue  # racing writer or vanished file: next pass picks it up
     if any(reaped.values()):  # one lock for the whole pass, not one per deleted room
         _bump(root, **reaped)
+    # After the deletions, so the figure reflects the disk as it now is. One extra walk of
+    # the rooms directory (~13 ms at the cap) on a pass that already costs half a second,
+    # bought because the alternative is walking it on every append instead.
+    try:
+        used = _scan(root / "rooms", ".jsonl", sized=True)[1]
+        usage_tmp = root / f"{USAGE_FILE}.tmp"
+        usage_tmp.write_text(str(used), encoding="utf-8")
+        os.replace(usage_tmp, root / USAGE_FILE)
+    except OSError:
+        pass  # a missing usage file reads as no pressure, which fails open, not closed
     # Sidecar locks are deliberately *not* removed with their data file: unlinking one a
     # writer holds splits the lock domain (the next writer locks a fresh inode). Instead
     # sweep the orphans — a lock with no data file, idle as long as any reaped room — so
@@ -923,6 +955,26 @@ def _check_capacity(path: Path, suffix: str, cap: int, what: str) -> None:
         return
     if _scan(path.parent, suffix)[0] >= cap:
         raise _at_capacity(cap, what)
+
+
+def room_bytes_used(root: Path) -> int:
+    """Total room bytes at the last reap pass, or 0 if none has run yet.
+
+    0 means "no pressure", which is the right default: on a fresh store there is none, and
+    the first write runs a reap and establishes the real figure.
+    """
+    try:
+        return int((root / USAGE_FILE).read_text(encoding="utf-8").strip() or 0)
+    except (OSError, ValueError):
+        return 0
+
+
+def _ring_limit(root: Path) -> int:
+    """How much ring a room may keep right now — the full ring, or its guaranteed floor
+    once the service is over its total room-byte budget. See RESERVED_ROOM_BYTES."""
+    if room_bytes_used(root) < MAX_TOTAL_ROOM_BYTES:
+        return MAX_ROOM_BYTES
+    return RESERVED_ROOM_BYTES
 
 
 def _check_room_capacity(path: Path) -> None:
@@ -1145,14 +1197,17 @@ def _write_record(
             f.write(line)
             f.flush()
             os.fsync(f.fileno())
-        if path.stat().st_size > MAX_ROOM_BYTES:
-            _compact(path, cutoff=_cutoff(room))
+        limit = _ring_limit(root)
+        if path.stat().st_size > limit:
+            _compact(path, cutoff=_cutoff(room), keep=limit // 2)
     return rec, created
 
 
-def _compact(path: Path, cutoff: float | None = None) -> None:
-    """Keep the newest messages that fit COMPACT_KEEP_BYTES; drop the rest. Caller holds
-    the lock.
+def _compact(path: Path, cutoff: float | None = None, keep: int = COMPACT_KEEP_BYTES) -> None:
+    """Keep the newest messages that fit `keep` bytes; drop the rest. Caller holds the lock.
+
+    `keep` is half the ring the caller decided this room may have, which is the full ring
+    normally and RESERVED_ROOM_BYTES when the service is over its total byte budget.
 
     `cutoff` is the `e-` class's rotation half: the records drop-on-read already hides stop
     occupying disk the next time the room rotates. No background reaper — this is the one
@@ -1171,7 +1226,7 @@ def _compact(path: Path, cutoff: float | None = None) -> None:
     with path.open("rb") as f:
         for line in reverse_lines(f, max_bytes=MAX_ROOM_BYTES):
             total += len(line) + 1  # the newline this line costs on the way back out
-            if total > COMPACT_KEEP_BYTES or len(kept) >= COMPACT_MAX_LINES:
+            if total > keep or len(kept) >= COMPACT_MAX_LINES:
                 break
             if cutoff is not None and kept:
                 # `and kept`: the newest record is always retained, expired or not, because

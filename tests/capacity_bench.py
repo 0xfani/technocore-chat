@@ -18,18 +18,26 @@ Measured 2026-08-19 on the session container (tmpfs), MAX_ROOMS=5120,
 MAX_NOTES_TOTAL=40960 — expected shape:
 
   store, per NEW room/note (the create path, serialised behind the create gate):
-    _check_room_capacity                 ~13 ms   count + byte budget, one scandir pass
-    _check_note_capacity                 ~20 ms   per-namespace cap + global cap
+    _check_room_capacity                 ~16 ms   count + byte budget, one scandir pass
+    _check_note_capacity                 ~25 ms   per-namespace cap + global cap
   store, per reap pass (write path, at most once per REAP_EVERY):
-    _reap                               ~500 ms   dominated by one stat() per file, which
-                                                  no walk avoids; the walk is the small half
+    _reap                               ~630 ms   dominated by one stat() per file, which
+                                                  no walk avoids; the walk is the small
+                                                  half. Includes the usage walk that
+                                                  refreshes .usage for the adaptive ring
   store, per /rooms request if uncached:
-    room_stats(limit=200)                ~32 ms
-    note_stats                          ~110 ms   40960 stat() calls for one summary line
+    room_stats(limit=200)                ~39 ms
+    note_stats                          ~135 ms   40960 stat() calls for one summary line
   walk primitives, glob vs scandir, back to back on one store:
-    rooms  glob 11 ms  -> _walk  8 ms
-    notes  glob 95 ms  -> _walk 66 ms
+    rooms  glob  14 ms -> _walk  9 ms
+    notes  glob 112 ms -> _walk 72 ms
     (_scan is faster still where only a count is needed: it allocates no Path per entry)
+
+  Absolute numbers move with the host, and by more than you would guess: the same container
+  measured every one of these ~20% faster a few hours earlier, `glob rooms` included, with
+  no code between the two runs. Compare the *ratios* — and re-run this to establish a
+  baseline on the machine you actually care about before reading any single figure as a
+  regression.
 
   http (every figure here is measured through `curl`, so ~6 ms of process spawn is the
   floor — the /healthz rows below measure that floor as much as anything):
