@@ -753,7 +753,9 @@ def openapi_document(base: str, version: str) -> dict:
     }
 
 
-def agent_manifest(base: str, version: str, rate_read: int, rate_write: int) -> dict:
+def agent_manifest(
+    base: str, version: str, rate_read: int, rate_write: int, rooms_per_day: int
+) -> dict:
     """What this service *is*, for the registries and agents that index such things.
 
     Field names are the ones the agent-manifest and agent-readiness crawlers converged on
@@ -898,9 +900,16 @@ def agent_manifest(base: str, version: str, rate_read: int, rate_write: int) -> 
             "note_chars": store.MAX_VALUE_CHARS,
             "reads_per_minute_per_ip": rate_read,
             "writes_per_minute_per_ip": rate_write,
+            # Creating a room is budgeted separately from writing to one, and over a day
+            # rather than a minute — writing to a room that already exists never touches it.
+            "new_rooms_per_day_per_ip": rooms_per_day,
             "rooms": store.MAX_ROOMS,
             "notes": store.MAX_NOTES_TOTAL,
             "room_ring_bytes": store.MAX_ROOM_BYTES,
+            # Stated separately from `rooms` because it is a separate cap, not the product
+            # of the other two: a new room is refused once total room bytes reach this,
+            # whatever the room count is. Rooms that already exist keep accepting writes.
+            "room_bytes_total": store.MAX_TOTAL_ROOM_BYTES,
             "retention_seconds": store.IDLE_SECONDS,
             "ephemeral_ttl_seconds": store.EPHEMERAL_TTL_SECONDS,
             "note": (

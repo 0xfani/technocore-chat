@@ -202,6 +202,88 @@ def test_room_count_is_capped_so_disk_is_bounded(tmp_path, monkeypatch):
         store.append(tmp_path, "overflow", "bot", "hi")
 
 
+def test_room_disk_is_capped_independently_of_the_room_count(tmp_path, monkeypatch):
+    """The bound that lets MAX_ROOMS grow without the volume growing.
+
+    The room count used to *be* the disk budget (MAX_ROOMS * MAX_ROOM_BYTES). It no longer
+    is, so the byte cap has to bite on its own — with the count cap nowhere near, which is
+    exactly the case the old derivation could not express.
+    """
+    import store
+
+    monkeypatch.setattr(store, "MAX_ROOMS", 10_000)  # far from binding: bytes must do it
+    monkeypatch.setattr(store, "MAX_TOTAL_ROOM_BYTES", 400)
+    store.append(tmp_path, "room0", "bot", "x" * 300)  # room0 + events ≈ 452B, over budget
+    with pytest.raises(store.StoreError, match="room storage is full"):
+        store.append(tmp_path, "overflow", "bot", "hi")
+    # The half that matters as much as the refusal: a room that exists is never cut off,
+    # because compaction already holds it under MAX_ROOM_BYTES.
+    store.append(tmp_path, "room0", "bot", "still fine")
+    assert "still fine" in store.room_path(tmp_path, "room0").read_text()
+
+
+def test_every_room_can_still_carry_a_topic_and_an_owner(tmp_path, monkeypatch):
+    """MAX_NOTES_PER_NS = MAX_ROOMS is only true if the *global* note cap can cover it.
+
+    Raising MAX_ROOMS without raising MAX_NOTES_TOTAL would leave the per-namespace cap
+    nominally equal to the room cap and the global cap binding first — the invariant would
+    read as intact in the source and be false on disk.
+    """
+    import store
+
+    assert store.MAX_NOTES_PER_NS == store.MAX_ROOMS
+    reserved = (store.TOPIC_NS, store.OWNERS_NS, store.ALLOW_NS, store.NONCE_NS)
+    assert store.MAX_NOTES_TOTAL >= len(reserved) * store.MAX_ROOMS
+
+
+def test_new_rooms_are_budgeted_per_ip_and_say_when_to_retry(client, monkeypatch):
+    """The room cap bounds the service; this bounds how much of it one caller can take.
+
+    Without it, MAX_ROOMS is not a cap so much as a race: at the write limit a single IP
+    exhausts it in hours, and everyone else meets the fail-closed refusal.
+    """
+    import app as app_module
+
+    monkeypatch.setattr(app_module, "RATE_ROOMS_PER_DAY", 3)
+    for i in range(3):
+        assert client.get(f"/r/fresh{i}/say/bot/hi").status_code == 200
+
+    r = client.get("/r/one-too-many/say/bot/hi")
+    assert r.status_code == 429
+    assert int(r.headers["Retry-After"]) > 0  # machine-readable...
+    assert "retry after:" in r.text  # ...and in the body, which is all most harnesses show
+    assert "room-creation budget spent" in r.text
+    # The refusal has to leave the caller something to do *now*, or it is an outage with a
+    # timer on it. Rooms that exist are the answer, so the reply has to say so.
+    assert "ALREADY EXISTS" in r.text and "/r/lobby" in r.text
+    assert "one-too-many" not in client.get("/rooms").text  # and nothing was created
+
+    # The budget refills rather than resetting: no cliff, no stampede at a window boundary.
+    assert "refills continuously" in r.text
+    # Rooms this IP already has are untouched — the property that keeps work moving.
+    assert client.get("/r/fresh0/say/bot/still%20here").status_code == 200
+
+
+def test_writing_to_an_existing_room_never_spends_the_room_budget(client, monkeypatch):
+    """The budget is on *creation*. A long conversation in one room must cost exactly one."""
+    import app as app_module
+
+    monkeypatch.setattr(app_module, "RATE_ROOMS_PER_DAY", 2)
+    monkeypatch.setattr(app_module, "RATE_WRITE", 500)  # isolate this from the write limit
+    assert client.get("/r/only/say/bot/hi").status_code == 200
+    for i in range(40):
+        assert client.get(f"/r/only/say/bot/msg{i}").status_code == 200
+    assert client.get("/r/second/say/bot/hi").status_code == 200  # the 2nd and last
+    assert client.get("/r/third/say/bot/hi").status_code == 429
+
+
+def test_the_room_budget_is_published_where_agents_look(client):
+    import app as app_module
+
+    limits = client.get("/.well-known/agent.json").json()["limits"]
+    assert limits["new_rooms_per_day_per_ip"] == app_module.RATE_ROOMS_PER_DAY
+
+
 def test_junk_query_params_never_500(client):
     """A harness that mangles a URL must get the default view, not a stack trace."""
     client.get("/r/lobby/say/bot/hi")
@@ -657,13 +739,16 @@ def test_rooms_overview_carries_stats_newest_first(client, tmp_path):
 
 
 def test_rooms_overview_hides_private_rooms_and_survives_an_empty_store(client):
+    import store
+
     assert "no rooms yet" in client.get("/rooms").text
     assert client.get("/rooms?format=json").json() == {
         "rooms": [],
         "total": 0,
-        "capacity": 512,
+        "capacity": store.MAX_ROOMS,
         "bytes": 0,
-        "notes": {"total": 0, "bytes": 0, "capacity": 4096},
+        "bytes_capacity": store.MAX_TOTAL_ROOM_BYTES,
+        "notes": {"total": 0, "bytes": 0, "capacity": store.MAX_NOTES_TOTAL},
         "engagement": {
             "window_cap": 200,
             "windowed_messages": 0,
@@ -1075,12 +1160,15 @@ def test_old_second_precision_records_still_parse(tmp_path, monkeypatch):
 
 
 def test_rooms_reports_note_usage_without_naming_namespaces(client):
+    import store
+
     client.get("/kv/p-secretns/k/set/hello")
     body = client.get("/rooms").text
-    assert "notes 1 of 4096" in body
+    assert f"notes 1 of {store.MAX_NOTES_TOTAL}" in body
     assert "p-secretns" not in body  # aggregate only: namespaces stay unenumerable
     stats = client.get("/rooms?format=json").json()["notes"]
-    assert stats["total"] == 1 and stats["bytes"] == 5 and stats["capacity"] == 4096
+    assert stats["total"] == 1 and stats["bytes"] == 5
+    assert stats["capacity"] == store.MAX_NOTES_TOTAL
 
 
 def test_newlines_are_flattened_in_both_write_lanes(client):
@@ -1685,7 +1773,13 @@ def test_the_human_page_shares_by_copying_a_fragment_permalink(client):
     body = client.get("/humans").text
     assert "navigator.clipboard.writeText" in body
     assert "createElement('button')" in body  # the share controls are buttons
-    assert "'copy link'" in body and "done('copied')" in body
+    # The share control is an icon now, so the label moved into a .sr-only span rather than
+    # being dropped: the button still announces what it does and still announces "copied".
+    assert "'copy link to '" in body and "'copied'" in body
+    assert "class = 'sr-only'" in body.replace(".className = ", "class = ")
+    # Icons are cloned from inert <template>s — the only way to get markup into this page
+    # without the innerHTML the tests above forbid.
+    assert '<template id="ico-copy">' in body and "cloneNode(true)" in body
     # #r/<room> and #r/<room>/<seq>, restored on load and written back with replaceState
     assert "'#r/' + name" in body and "history.replaceState" in body
     assert "replace(/^r\\//, '')" in body
@@ -1856,7 +1950,7 @@ def test_stats_counts_every_room_class_and_names_none_of_them(stats_client):
         1,
         1,
     )
-    assert rooms["listed"] == 5 and rooms["capacity"] == 512
+    assert rooms["listed"] == 5 and rooms["capacity"] == store.MAX_ROOMS
     assert view["notes"]["total"] == 1 and view["bytes"]["rooms"] > 0
 
     for secret in ("verysecret", "privatens", "somekey", "somenick", "postbox", "openroom"):

@@ -62,6 +62,13 @@ MAX_BODY = 32768
 # the limiter exists at all.
 RATE_READ = max(1, int(os.environ.get("CHAT_RATE_READ", "120")))  # requests/min/IP
 RATE_WRITE = max(1, int(os.environ.get("CHAT_RATE_WRITE", "30")))
+# A per-IP budget on bringing *new rooms into existence*, measured over a day rather than a
+# minute. RATE_WRITE bounds how fast one caller can talk; nothing bounded how many rooms one
+# caller could create, and those are not the same resource. At 30 writes/min a single caller
+# exhausts the room cap in under three hours, and the slots it takes are everyone's — the
+# next caller, whoever they are, gets the fail-closed refusal. This is what makes MAX_ROOMS
+# a cap on the service rather than a race won by whoever creates rooms fastest.
+RATE_ROOMS_PER_DAY = max(1, int(os.environ.get("CHAT_RATE_ROOMS_PER_DAY", "20")))
 # Both of the above are per deployment, which is why no document states them as prose:
 # /.well-known/agent.json publishes what this process actually enforces, and the manual
 # points there. A manual naming a number the server does not enforce is worse than one
@@ -184,14 +191,24 @@ def client_ip(request: Request) -> str:
     return request.client.host if request.client else "?"
 
 
-def take(request: Request, kind: str, per_min: int) -> tuple[int, float]:
+def take(
+    request: Request, kind: str, per_min: float, burst: float | None = None
+) -> tuple[int, float]:
     """Token bucket per (client IP, kind). Returns (tokens left, seconds until the
     next one). Process-local: a real deployment puts the authoritative limit in the
-    reverse proxy."""
+    reverse proxy.
+
+    `burst` is the bucket's capacity, and defaults to one minute's worth because that is
+    what a per-minute budget means. A budget measured over a *day* needs the two apart:
+    the capacity is the whole day's allowance and `per_min` is only the rate that hands it
+    back. Folded together, a 20-rooms-per-day budget would be a bucket holding 0.0139
+    tokens, which never reaches the 1.0 a grant costs — the limit would refuse everything.
+    """
     ip = client_ip(request)
     now = time.monotonic()
-    tokens, last = _buckets.get((ip, kind), (float(per_min), now))
-    tokens = min(float(per_min), tokens + (now - last) * per_min / 60.0)
+    cap = float(per_min if burst is None else burst)
+    tokens, last = _buckets.get((ip, kind), (cap, now))
+    tokens = min(cap, tokens + (now - last) * per_min / 60.0)
     if tokens >= 1.0:  # granted: no wait, even when this was the last token
         tokens -= 1.0
         wait = 0.0
@@ -497,7 +514,11 @@ def agent_json(request: Request) -> Response:
     agent deciding whether to use it. Includes the untrusted/non-durable/world-writable
     facts as structured fields, because a machine reader should not have to infer them
     from prose. Unlimited, same as the manual."""
-    return _document(manifest.agent_manifest(_base_url(request), VERSION, RATE_READ, RATE_WRITE))
+    return _document(
+        manifest.agent_manifest(
+            _base_url(request), VERSION, RATE_READ, RATE_WRITE, RATE_ROOMS_PER_DAY
+        )
+    )
 
 
 def api_catalog(request: Request) -> Response:
@@ -594,7 +615,13 @@ def _ago(seconds: int) -> str:
 
 
 def _size(n: int) -> str:
-    return f"{n / 1024:.1f}K" if n >= 1024 else f"{n}B"
+    """Bytes at a glance. Tiers up to G because the room budget is measured in GiB now:
+    at one tier a 5 GiB cap prints as `5242880.0K`, which is a number a reader has to do
+    arithmetic on before it means anything."""
+    for unit, scale in (("G", 1 << 30), ("M", 1 << 20), ("K", 1 << 10)):
+        if n >= scale:
+            return f"{n / scale:.1f}{unit}"
+    return f"{n}B"
 
 
 def rooms(request: Request) -> Response:
@@ -621,8 +648,11 @@ def rooms(request: Request) -> Response:
         body = "(no rooms yet — GET /r/<name>/say/<nick>/<text> creates one)\n" + notes_line
     else:
         head = (
+            # Both caps, because either can be the one that refuses the next room and an
+            # agent that hit one needs to know which: the count is not the disk budget.
             f"# {len(view['rooms'])} of {view['total']} rooms "
-            f"(cap {view['capacity']}, {_size(view['bytes'])} total), newest first"
+            f"(cap {view['capacity']}, {_size(view['bytes'])} of "
+            f"{_size(view['bytes_capacity'])} stored), newest first"
         )
         # One line, not a column: the per-room numbers are on ?format=json, because the text
         # view is what lands in an agent's context and that budget is the scarce one.
@@ -768,7 +798,7 @@ def _allowed_keys(room: str) -> set[str]:
     return keys | {k for k in allow.split() if didkey.is_did(k)}
 
 
-def _room_write_gate(room: str, signer: str | None) -> Response | None:
+def _room_write_gate(request: Request, room: str, signer: str | None) -> Response | None:
     """Every write to a room passes here, signed or not. Fail closed: a class that demands
     a signature refuses the unsigned lane outright, and the reply says what to send."""
     denied = _reject_if_events_room(room)
@@ -781,22 +811,71 @@ def _room_write_gate(room: str, signer: str | None) -> Response | None:
             f"send: GET /r/{room}/say-signed/<did:key>/<sig>/<nonce>/<text> — see /llms.txt",
             403,
         )
-    if store.note_get(ROOT, store.OWNERS_NS, room) is None:
-        return None  # no owner record: an ordinary open room, exactly as before
-    allowed = _allowed_keys(room)
-    if signer is None:
-        return text(
-            f"403 /r/{room} is owned: writes must be signed by a key the owner listed.\n"
-            f"owner: /kv/{store.OWNERS_NS}/{room} · allowed: /kv/{store.ALLOW_NS}/{room}",
-            403,
-        )
-    if signer not in allowed:
-        return text(
-            f"403 {didkey.abbreviate(signer)} is not listed for /r/{room}. The owner adds "
-            f"keys with a signed write to /kv/{store.ALLOW_NS}/{room}.",
-            403,
-        )
-    return None
+    if store.note_get(ROOT, store.OWNERS_NS, room) is not None:
+        allowed = _allowed_keys(room)
+        if signer is None:
+            return text(
+                f"403 /r/{room} is owned: writes must be signed by a key the owner listed.\n"
+                f"owner: /kv/{store.OWNERS_NS}/{room} · allowed: /kv/{store.ALLOW_NS}/{room}",
+                403,
+            )
+        if signer not in allowed:
+            return text(
+                f"403 {didkey.abbreviate(signer)} is not listed for /r/{room}. The owner adds "
+                f"keys with a signed write to /kv/{store.ALLOW_NS}/{room}.",
+                403,
+            )
+    # Last, so a token is only ever spent on a write that would otherwise have been
+    # accepted: an IP hammering a mailbox it cannot write to does not also burn the room
+    # budget it never got to use.
+    return _room_create_gate(request, room)
+
+
+def _room_create_gate(request: Request, room: str) -> Response | None:
+    """Per-IP budget on bringing a *new* room into existence. See RATE_ROOMS_PER_DAY.
+
+    A token bucket rather than a quota that resets at midnight, deliberately. A hard reset
+    hands every blocked caller the same retry time, which turns a queue into a stampede at
+    the top of the window and leaves the budget unusable for the hours before it. A bucket
+    hands back one room every RATE_ROOMS_PER_DAY-th of a day, continuously, so callers are
+    served roughly in the order they waited and the service recovers without an operator
+    doing anything.
+
+    Writing to a room that *already exists* never reaches the bucket, which is the property
+    that keeps this from stopping work: an agent mid-conversation is untouched, and a
+    blocked one has something it can do this second rather than in an hour — reuse a room.
+
+    Two honest limits, both inherited from the limiter this rides on. State is in-process,
+    so a restart refunds every bucket; and `_buckets` is an LRU, so a flood of more than
+    MAX_BUCKETS concurrently-active IPs evicts entries early. Eviction is free for a
+    per-minute budget (an evicted entry had refilled anyway) and is *not* free for a daily
+    one, which is the price of not adding a datastore to a service that has none. The
+    authoritative limit belongs in the proxy, exactly as it does for the other two.
+    """
+    if store.room_path(ROOT, room).exists():
+        return None  # not a creation at all
+    _, retry = take(request, "create", RATE_ROOMS_PER_DAY / 1440.0, burst=RATE_ROOMS_PER_DAY)
+    if not retry:
+        return None
+    wait = max(1, round(retry))
+    every = round(86400 / RATE_ROOMS_PER_DAY)
+    r = text(
+        f"429 room-creation budget spent: /r/{room} does not exist yet, and this IP has "
+        f"created its {RATE_ROOMS_PER_DAY} rooms for the day.\n"
+        f"retry after: {wait}s — the budget refills continuously (one room every {every}s), "
+        f"so it is never all-or-nothing at a reset, and waiting longer buys a bigger burst "
+        f"up to {RATE_ROOMS_PER_DAY}.\n"
+        f"still open: writing to a room that ALREADY EXISTS is unaffected and costs nothing "
+        f"from this budget. GET /rooms lists what exists, /r/events announces new public "
+        f"rooms, and /r/lobby always accepts a message — reuse one rather than waiting.\n"
+        f"why: rooms are a shared capped resource ({store.MAX_ROOMS} of them, reclaimed "
+        f"after 7 days idle); this bounds how much of it one caller can hold at once.\n"
+        f"the enforced number is also published at /.well-known/agent.json under "
+        f"limits.new_rooms_per_day_per_ip.",
+        429,
+    )
+    r.headers["Retry-After"] = str(wait)
+    return r
 
 
 def _signer(did: str, sig: str, nonce: str, canonical: str) -> str | Response:
@@ -829,7 +908,7 @@ def room_say(request: Request) -> Response:
     if retry:
         return limited("write", RATE_WRITE, retry)
     room = request.path_params["room"]
-    denied = _room_write_gate(room, None)
+    denied = _room_write_gate(request, room, None)
     if denied:
         return denied
     rec = store.append(ROOT, room, request.path_params["nick"], request.path_params["text"])
@@ -855,7 +934,7 @@ def room_say_signed(request: Request) -> Response:
     signer = _signer(p["did"], p["sig"], nonce, f"{room}|{nonce}|{body}")
     if isinstance(signer, Response):
         return signer
-    denied = _room_write_gate(room, signer)
+    denied = _room_write_gate(request, room, signer)
     if denied:
         return denied
     rec = store.append(ROOT, room, "", body, did=signer, nonce=int(nonce))
@@ -932,7 +1011,7 @@ async def room_post(request: Request) -> Response:
         signer = _signer(did, sig, nonce, f"{room}|{nonce}|{body}")
         if isinstance(signer, Response):
             return signer
-    denied = _room_write_gate(room, signer)
+    denied = _room_write_gate(request, room, signer)
     if denied:
         return denied
     if signer is None:
