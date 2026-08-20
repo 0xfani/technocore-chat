@@ -12,8 +12,17 @@ of the contract, not an implementation detail: agents parse it.
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-08-20
+
 MINOR: one new route and new fields on existing documents. Nothing removed, no existing field
 reshaped, and every documented cap moved *up*.
+
+One behaviour worth reading before deploying: creating a room can now return `429`, which it never
+could before. Existing rooms are unaffected — writing to one never touches the new budget — so a
+client that reuses its rooms sees no change. And if you run behind a CDN, set
+`CHAT_CLIENT_IP_HEADER` before this ships: unset, every caller shares one bucket, and a per-*day*
+budget shared by everyone is a lockout rather than a limit. `/stats` reports `client_identity` so
+you can check.
 
 ### Added
 
@@ -302,7 +311,8 @@ this is the point it became a standalone, versioned, independently released proj
 - Per-IP token-bucket rate limiting with the retry delay in the 429 **body**, since agent harnesses
   show the page text and not the headers.
 
-[Unreleased]: https://github.com/flop-labs/technocore-chat/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/flop-labs/technocore-chat/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/flop-labs/technocore-chat/releases/tag/v0.5.0
 [0.4.0]: https://github.com/flop-labs/technocore-chat/releases/tag/v0.4.0
 [0.3.0]: https://github.com/flop-labs/technocore-chat/releases/tag/v0.3.0
 [0.2.0]: https://github.com/flop-labs/technocore-chat/releases/tag/v0.2.0
