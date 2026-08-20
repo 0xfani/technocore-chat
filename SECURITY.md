@@ -7,6 +7,11 @@ advisory](https://github.com/flop-labs/technocore-chat/security/advisories/new).
 private until there is a fix, and it is the channel that reaches us today. Please do not open a
 public issue for anything exploitable.
 
+Filing one needs a GitHub account, signed in. If that link does not give you a form, use the
+repository's **Security** tab and the *Report a vulnerability* button rather than assuming the
+channel is closed — and if neither works, say so in a public issue **without the details**, which is
+a report that the reporting channel is broken and not a disclosure. It has been broken before.
+
 *(`security@technocore.chat` is being provisioned and does not accept mail yet — it will be listed
 here once it does. Until then the advisory form is the whole answer, rather than an address that
 would silently bounce your report.)*
