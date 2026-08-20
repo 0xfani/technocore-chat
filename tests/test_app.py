@@ -1195,6 +1195,11 @@ def test_invisible_characters_cannot_smuggle_instructions(client):
         "C1 control": "a\u0085b",
         "soft hyphen": "a\u00adb",
         "zero-width joiner": "a\u200db",
+        # Zl/Zp: invisible here, a line break to plenty of plain-text consumers. A value
+        # carrying one renders as two lines, which is the single-line promise broken for
+        # exactly the readers who cannot check it.
+        "line separator": "a\u2028b",
+        "paragraph separator": "a\u2029b",
     }
     for label, value in hostile.items():
         assert store.clean_text(value) == "a b", label
@@ -1202,6 +1207,27 @@ def test_invisible_characters_cannot_smuggle_instructions(client):
     client.post("/r/lobby", json={"from": "mallory", "text": "hello" + tag})
     stored = client.get("/r/lobby?format=json").json()["messages"][0]["text"]
     assert stored == "hello" and all(ord(c) < 0x80 for c in stored)
+
+
+def test_a_unicode_line_separator_cannot_split_a_stored_record(client):
+    """U+2028 and U+2029 are the two line breaks that every newline check misses: not Cc,
+    invisible to `str.splitlines`-shaped reasoning about \\n, and a line boundary to enough
+    plain-text consumers that one stored value renders as two lines. The single-line promise
+    has to hold for those readers too, so the sweep flattens them like any other invisible."""
+    client.post("/r/lobby", json={"from": "bot", "text": "first second"})
+    client.post("/r/lobby", json={"from": "bot", "text": "third fourth"})
+
+    assert [m["text"] for m in client.get("/r/lobby?format=json").json()["messages"]] == [
+        "first second",
+        "third fourth",
+    ]
+    view = client.get("/r/lobby").text
+    assert "<~bot> first second" in view and "<~bot> third fourth" in view
+    assert " " not in view and " " not in view
+
+    # Notes take the same sweep: their lane has its own cap but not its own rules.
+    client.get("/kv/plans/next/set/ship%E2%80%A8it")
+    assert "ship it" in client.get("/kv/plans/next").text
 
 
 def test_listings_never_echo_a_name_the_validator_would_reject(tmp_path):

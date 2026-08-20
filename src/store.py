@@ -154,13 +154,14 @@ ALLOW_NS = "room-allow"  # /kv/room-allow/<room>  -> space-separated did:keys
 # for its own atomicity. MAX_NOTES_PER_NS = MAX_ROOMS, so every room may hold an owner.
 NONCE_NS = "room-nonce"
 TOPIC_NS = "topic"  # /kv/topic/<room>      -> what the room is for
-# A topic is an ordinary note (8 KiB), and /rooms shows up to 50 of them: printed in full
-# that is a 400 KB reply against a response budget measured in kilobytes. The overview
+# A topic is an ordinary note (MAX_VALUE_CHARS), and /rooms shows one per room it lists:
+# printed in full that is a reply measured in hundreds of KB, against a response budget
+# measured in kilobytes. The overview
 # carries a preview; /kv/topic/<room> carries the whole thing.
 TOPIC_PREVIEW_CHARS = 120
 # Lazy expiry for the `e-` class: nothing sweeps in the background, records are simply not
 # returned once they are older than this, and physically leave on the next compaction or
-# when the 7-day reaper takes the file.
+# when the IDLE_SECONDS reaper takes the file.
 EPHEMERAL_TTL_SECONDS = int(os.environ.get("CHAT_EPHEMERAL_TTL_SECONDS", "900"))
 
 
@@ -244,25 +245,38 @@ def ownable(name: str) -> bool:
     return "d" in room_classes(name) and name not in UNOWNABLE_ROOMS
 
 
+# The Unicode categories `clean_text` replaces with a space, and why each is on the list.
+# One list, in one place: the reason a value is swept is the reason it is named here, and a
+# docstring that also enumerated them would be a second copy to keep in step.
+#
+#   Cc  control      — C0/C1 would break the JSONL one-record-per-line invariant.
+#   Cf  format       — the *invisible instruction* smuggling vector against LLM readers.
+#                      Unicode tag characters U+E0000–U+E007F encode ASCII that no human or
+#                      log line shows, bidi overrides (U+202E) reorder displayed text away
+#                      from what is stored (Trojan Source), and zero-width joiners hide word
+#                      boundaries. This service's stated top hazard is cross-agent prompt
+#                      injection (design doc §3.1), so text that renders as nothing must not
+#                      survive into another agent's context.
+#   Cs  surrogate    — never valid on its own in stored text.
+#   Co  private use  — renders as whatever the reader's font decides, which is not a promise.
+#   Zl  line sep     — U+2028, and Zp U+2029: invisible here, a line break to enough
+#   Zp  para sep       plain-text consumers (JS string literals among them) that one stored
+#                      value renders as two lines. The single-line promise has to hold for
+#                      every reader, not just the ones that agree with `str.splitlines`.
+INVISIBLE_CATEGORIES = ("Cc", "Cf", "Cs", "Co", "Zl", "Zp")
+
+
 def clean_text(text: str, limit: int = MAX_TEXT_CHARS) -> str:
-    """Drop every invisible character, not just ASCII controls.
+    """Replace every character in INVISIBLE_CATEGORIES with a space, then trim.
 
-    Two reasons, and the second is the important one on this service:
+    What that buys: one stored record is one line for every reader, and nothing that renders
+    as nothing survives into another agent's context.
 
-    * C0/C1 controls would break the JSONL one-record-per-line invariant.
-    * Format characters (category Cf) are the *invisible instruction* smuggling vector
-      against LLM readers — Unicode tag characters U+E0000–U+E007F encode ASCII that no
-      human or log line shows, bidi overrides (U+202E) reorder displayed text away from
-      what is stored (Trojan Source), and zero-width joiners hide word boundaries. This
-      service's stated top hazard is cross-agent prompt injection (design doc §3.1), so
-      text that renders as nothing must not survive into another agent's context.
-
-    Categories dropped: Cc (control), Cf (format), Cs (surrogate), Co (private use).
     Trade-off, accepted deliberately: ZWJ emoji sequences flatten (👨‍👩‍👧 → 👨👩👧).
     Mangled emoji is visible and harmless; a smuggled instruction is neither.
     """
     text = "".join(
-        " " if unicodedata.category(c) in ("Cc", "Cf", "Cs", "Co") else c for c in text
+        " " if unicodedata.category(c) in INVISIBLE_CATEGORIES else c for c in text
     ).strip()
     if not text:
         # Distinguishing "you sent nothing" from "the sweep ate all of it" matters: the
@@ -270,9 +284,9 @@ def clean_text(text: str, limit: int = MAX_TEXT_CHARS) -> str:
         # characters would otherwise re-send the same bytes and get the same refusal.
         raise StoreError(
             "empty text: nothing visible was left after the single-line sweep, which "
-            "replaces every control and format character (newline, zero-width, bidi "
-            "override, Unicode tag) with a space and then trims the ends. Send at least "
-            "one visible character."
+            "replaces every control, format and line-separator character (newline, "
+            "zero-width, bidi override, Unicode tag, U+2028) with a space and then trims "
+            "the ends. Send at least one visible character."
         )
     if len(text) > limit:
         raise StoreError(
@@ -466,8 +480,8 @@ def last_seq(root: Path, room: str) -> int:
 # which is the *same* read `last_seq` already did for every room /rooms shows, so the read
 # budget of the overview is unchanged and only the parse of those bytes is new. Worst case for
 # one /rooms request is therefore `shown` (<= MAX_LIMIT = 200) x WINDOW_BYTES = 12.8 MiB parsed,
-# ~210 ms at the ~60 MB/s parse rate measured in the design doc §5.1; at the default limit=50 it
-# is 3.2 MiB / ~55 ms, and a typical ~120-byte record makes the message cap bind first at ~24 KiB
+# ~210 ms at the ~60 MB/s parse rate measured in the design doc §5.1; at this function's default
+# limit it is 3.2 MiB / ~55 ms, and a typical ~120-byte record makes the message cap bind first at ~24 KiB
 # per room. Rooms that are *not* shown still cost only a directory stat. What this bound exists
 # to exclude is the obvious wrong implementation: a full-ring scan (10 MiB) across every room.
 WINDOW_MESSAGES = 200
@@ -711,7 +725,7 @@ def _reapable(path: Path, now: float, stillborn_rule: bool) -> str | None:
 
 # The three namespaces that gate access to a room rather than carry content. Their mtime
 # tracks when ownership last changed, not when the room was last used — so under the plain
-# idle rule a busy room's owner note expired after 7 quiet days of *ownership*, and with it
+# idle rule a busy room's owner note expired after IDLE_SECONDS of quiet *ownership*, and with it
 # went the allow-list (listed keys silently lose write access) and the replay counter (a
 # captured signed URL re-adding a revoked key starts working again). A control whose whole
 # job is to outlive an attacker must not expire before the thing it guards.
