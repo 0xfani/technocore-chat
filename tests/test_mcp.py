@@ -440,6 +440,30 @@ def test_an_integer_is_an_acceptable_number(mcp):
         assert "no new messages" in text_of(reply)
 
 
+def test_an_integral_float_is_an_acceptable_integer(mcp, monkeypatch):
+    """JSON Schema reads `integer` by value, not by spelling, so `1.0` satisfies the schema
+    this server advertised and a client that validated locally against it must not then be
+    told `-32602`. It reaches the handler as `1`, because `?since=1.0` is not what the
+    service parses — and `1.5`, which no reading makes an integer, is still rejected."""
+    server, protocol = mcp
+    asked = []
+    inner = urllib.request.urlopen
+    monkeypatch.setattr(
+        urllib.request,
+        "urlopen",
+        lambda request, timeout=None: (asked.append(request.full_url), inner(request, timeout))[1],
+    )
+
+    for i in range(3):
+        call(server, "say", {"room": "lobby", "text": f"m{i}", "nick": "bot"})
+    body = text_of(call(server, "read_room", {"room": "lobby", "since": 2.0}))
+    assert "m2" in body and "m0" not in body
+    assert asked[-1].endswith("?since=2")
+
+    fraction = call(server, "read_room", {"room": "lobby", "since": 1.5})
+    assert fraction["error"]["code"] == protocol.INVALID_PARAMS
+
+
 def test_by_position_params_are_rejected_rather_than_guessed(mcp):
     server, protocol = mcp
     reply = server.handle({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": ["say"]})

@@ -212,7 +212,7 @@ def schema_of(handler: Callable[..., str]) -> dict[str, Any]:
     return schema
 
 
-def _validate(arguments: dict[str, Any], schema: dict[str, Any]) -> None:
+def _validate(arguments: dict[str, Any], schema: dict[str, Any]) -> dict[str, Any]:
     """Arguments against the advertised schema, before the handler and before the network.
 
     Everything here is the caller's mistake, so it is `-32602` and not a tool result: a
@@ -220,6 +220,13 @@ def _validate(arguments: dict[str, Any], schema: dict[str, Any]) -> None:
     and letting it through would put a string where the service expects a seq. The other
     direction — a fetch that fails, a name the service rejects — is data the model *can* act
     on, and stays an `isError` result further down.
+
+    Returns the arguments the handler is called with, which is not always the dict that
+    arrived: JSON Schema reads `integer` by value and not by spelling, so `1.0` satisfies
+    the schema this server advertised and is narrowed to `1` here. Rejecting it would fail
+    a client that validated locally against our own document — the exact disagreement
+    generating these schemas was meant to end — and passing the float through would put
+    `?since=1.0` on the wire.
     """
     properties: dict[str, dict[str, Any]] = schema["properties"]
     unexpected = set(arguments) - set(properties)
@@ -228,13 +235,19 @@ def _validate(arguments: dict[str, Any], schema: dict[str, Any]) -> None:
     missing = set(schema.get("required", ())) - set(arguments)
     if missing:
         raise _BadParamsError(f"missing arguments: {', '.join(sorted(missing))}")
+    checked: dict[str, Any] = {}
     for name, value in arguments.items():
         expected = properties[name]
-        if not _CHECKS[expected["type"]](value):
-            raise _BadParamsError(f"argument {name!r} must be a {expected['type']}")
+        kind = expected["type"]
+        if kind == "integer" and isinstance(value, float) and value.is_integer():
+            value = int(value)  # `is_integer()` is False for nan and inf, which stay rejected
+        if not _CHECKS[kind](value):
+            raise _BadParamsError(f"argument {name!r} must be a {kind}")
         if "enum" in expected and value not in expected["enum"]:
             allowed = ", ".join(repr(choice) for choice in expected["enum"])
             raise _BadParamsError(f"argument {name!r} must be one of: {allowed}")
+        checked[name] = value
+    return checked
 
 
 # ------------------------------------------------------------------ tools
@@ -334,8 +347,7 @@ class Server:
         tool = self.tools.get(params["name"])
         if tool is None:
             raise _BadParamsError(f"unknown tool {params['name']!r}")
-        arguments = params.get("arguments") or {}
-        _validate(arguments, tool.schema)
+        arguments = _validate(params.get("arguments") or {}, tool.schema)
         try:
             body = tool.handler(**arguments)
         except Exception as exc:
