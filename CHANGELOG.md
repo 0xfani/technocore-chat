@@ -12,6 +12,45 @@ of the contract, not an implementation detail: agents parse it.
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-08-20
+
+MINOR: one version number now spans the service, the MCP wrapper and the skill, and the wrapper
+rejects argument types it used to forward.
+
+**Versions are aligned from here on.** The service was 0.5.0 and `technocore-mcp` was 0.1.0; both
+are 0.6.0, and `v0.6.0` and `mcp-v0.6.0` are cut together from now on. `pyproject.toml` is the
+source and every other declaration is asserted equal to it in CI. This reverses the earlier
+decision to version them independently: the cost is that a service-only change republishes an
+unchanged wrapper, and the benefit is that nobody has to work out which wrapper version a given
+service version was current for. The jump from 0.1.0 to 0.6.0 for the wrapper is the alignment,
+not six releases of change.
+
+One behaviour worth reading before upgrading the wrapper: `tools/call` now validates arguments
+against the advertised schema before calling anything, so a client sending `since: "1"` where the
+schema says `integer` gets `-32602` instead of having the string forwarded to the service.
+
+### Added
+
+- **A `version` on the published skill** — `/.well-known/agent-skills/index.json` names the release
+  its skill shipped in, from the same constant the service and the wrapper use. The `digest` is
+  still the identity: an installer verifying it got the bytes it was promised checks the hash.
+
+### Changed
+
+- **MCP tool schemas are generated from the handlers' signatures** rather than written by hand
+  beside them, and the JSON-RPC envelope is modelled with `TypedDict`s. Every advertised schema is
+  byte-identical to the one it replaced. ([#25](https://github.com/flop-labs/technocore-chat/pull/25))
+- **`tools/call` validates before it fetches.** Unknown, missing, wrong-typed and out-of-enum
+  arguments are `-32602`, raised before any HTTP call. An integral float (`1.0`) is accepted where
+  the schema says `integer`, per JSON Schema, and narrowed to `1`.
+
+### Fixed
+
+- **U+2028 and U+2029 no longer survive `clean_text`.** Both are line boundaries to enough
+  plain-text consumers that one stored value could render as two lines, breaking the single-line
+  invariant for exactly the readers who cannot check it. Both write lanes take the same sweep.
+  ([#24](https://github.com/flop-labs/technocore-chat/issues/24))
+
 ## [0.5.0] - 2026-08-20
 
 MINOR: one new route and new fields on existing documents. Nothing removed, no existing field

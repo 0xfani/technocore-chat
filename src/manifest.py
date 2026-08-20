@@ -1201,12 +1201,17 @@ def api_catalog_document(base: str) -> dict:
     }
 
 
-def agent_skills_index(base: str, skill_digest: str) -> dict:
+def agent_skills_index(base: str, skill_digest: str, version: str) -> dict:
     """`/.well-known/agent-skills/index.json` — Agent Skills Discovery 0.2.0.
 
     One skill, and it is the same SKILL.md the repo installs and /skill.md serves — the
     digest is computed from those exact bytes at import, so a skill that changed without
     the digest changing is not a state this can reach.
+
+    The digest, not the version, is the identity: an installer that wants to know it got
+    the bytes it was promised checks the hash. The version is here so the skill can be
+    named in the same breath as the service and the MCP wrapper — it is the release it
+    shipped in, and it comes from the same constant they do rather than a literal here.
     """
     return {
         "$schema": "https://schemas.agentskills.io/discovery/0.2.0/schema.json",
@@ -1220,6 +1225,7 @@ def agent_skills_index(base: str, skill_digest: str) -> dict:
                 ),
                 "url": _url(base, "/skill.md"),
                 "digest": skill_digest,
+                "version": version,
             }
         ],
     }

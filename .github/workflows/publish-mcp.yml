@@ -1,8 +1,11 @@
 name: Publish MCP wrapper
 
-# Tag-driven and separate from the service release, because they version independently:
-# `v0.3.0` ships the server image, `mcp-v0.1.0` ships the wrapper. One tag doing both would
-# force a wrapper release every time a rate limit changed.
+# Tag-driven, and released in lockstep with the service: one version number spans the
+# image, the wrapper and the skill, so `v0.6.0` and `mcp-v0.6.0` are cut together and name
+# the same release. The cost is accepted deliberately — a service-only change still
+# republishes an unchanged wrapper, which is the price of never having to work out which
+# wrapper version a given service version was current for. `pyproject.toml` is the source;
+# a test asserts every other declaration equals it.
 #
 # ONE-TIME SETUP, both of them outside this file:
 #   1. PyPI trusted publishing — https://pypi.org/manage/project/technocore-mcp/settings/publishing/
@@ -33,19 +36,21 @@ jobs:
 
       - uses: astral-sh/setup-uv@v5
 
-      # Three places claim this version and a mismatch publishes something other than what it
-      # says. server.json carries it twice — once for the server, once for the package — and
-      # server.py's VERSION is what `initialize` and the User-Agent report; the wheel derives
-      # its own from that constant, so pyproject has no literal to check.
+      # Four places claim this version and a mismatch publishes something other than what it
+      # says. server.json carries it twice — once for the server, once for the package —
+      # server.py's VERSION is what `initialize` and the User-Agent report, and the root
+      # pyproject is the number all of them follow. The wheel derives its own from that
+      # constant, so mcp/pyproject.toml has no literal to check.
       - name: Check the tag matches every version that claims it
         run: |
           tag="${GITHUB_REF_NAME#mcp-v}"
           code=$(grep -m1 '^VERSION = ' mcp/src/technocore_mcp/server.py | cut -d'"' -f2)
           srv=$(python -c 'import json;d=json.load(open("mcp/server.json"));print(d["version"])')
           pkg=$(python -c 'import json;d=json.load(open("mcp/server.json"));print(d["packages"][0]["version"])')
-          echo "tag=$tag server.py=$code server.json=$srv package=$pkg"
-          [ "$tag" = "$code" ] && [ "$tag" = "$srv" ] && [ "$tag" = "$pkg" ] ||
-            { echo "::error::version mismatch between the tag, server.py's VERSION and mcp/server.json"; exit 1; }
+          proj=$(grep -m1 '^version = ' pyproject.toml | cut -d'"' -f2)
+          echo "tag=$tag server.py=$code server.json=$srv package=$pkg pyproject=$proj"
+          [ "$tag" = "$code" ] && [ "$tag" = "$srv" ] && [ "$tag" = "$pkg" ] && [ "$tag" = "$proj" ] ||
+            { echo "::error::version mismatch between the tag, server.py's VERSION, mcp/server.json and pyproject.toml"; exit 1; }
 
       # The registry matches this against server.json's `name` to prove we own the PyPI
       # package. It fails there, after the release is public — cheaper to fail here.
