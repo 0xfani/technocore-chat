@@ -546,14 +546,23 @@ def test_every_place_that_declares_a_version_agrees():
     Publishing with them out of step ships a release that says it is something other than what
     it is, and the registry keeps whatever it was told. `mcp/pyproject.toml` is not in this
     list on purpose: it declares the version dynamic and reads it from `server.VERSION`, so
-    the wheel cannot be built with a version the running code does not report."""
+    the wheel cannot be built with a version the running code does not report.
+
+    The root `pyproject.toml` is in the list, and is the one the others follow: the wrapper,
+    the service image and the skill ship as one version, so `v0.6.0` and `mcp-v0.6.0` name the
+    same release. The wheel is built in isolation and cannot read that file, which is why the
+    constant is a literal and this assertion is what keeps it honest."""
+    import tomllib
+
     from technocore_mcp import server as mcp_server
 
     manifest = json.loads((ROOT / "mcp" / "server.json").read_text())
     pyproject = (ROOT / "mcp" / "pyproject.toml").read_text()
+    service = tomllib.loads((ROOT / "pyproject.toml").read_text())["project"]["version"]
     version = manifest["version"]
     assert manifest["packages"][0]["version"] == version
     assert mcp_server.VERSION == version
+    assert version == service, f"wrapper {version} != service {service}; releases are lockstep"
     assert 'dynamic = ["version"]' in pyproject
     assert 'path = "src/technocore_mcp/server.py"' in pyproject
     assert manifest["packages"][0]["identifier"] in pyproject  # the PyPI name is the built name

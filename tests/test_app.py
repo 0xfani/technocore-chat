@@ -2725,6 +2725,29 @@ def test_the_skills_index_digest_is_of_the_bytes_skill_md_actually_serves(client
     assert skill["url"].endswith("/skill.md") and skill["type"] == "skill-md"
 
 
+def test_the_skill_the_image_and_the_wrapper_all_name_one_version(client):
+    """Three artifacts ship from this repo and they are released together, so a reader who
+    has one of them can name the others — including the skill, whose entry carries the release
+    it shipped in alongside the digest that identifies its bytes. `version` is outside the five
+    fields Agent Skills Discovery 0.2.0 defines, which the spec provides for: clients MUST
+    ignore fields they do not recognise."""
+    import json as json_module
+    import tomllib
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[1]
+    service = tomllib.loads((root / "pyproject.toml").read_text())["project"]["version"]
+
+    skill = client.get("/.well-known/agent-skills/index.json").json()["skills"][0]
+    assert skill["version"] == service
+    # The five the spec defines are all still there: `version` is additive, and an entry that
+    # dropped one of these would be broken for every client regardless of the extra.
+    assert {"name", "type", "description", "url", "digest"} <= set(skill)
+    assert client.get("/openapi.json").json()["info"]["version"] == service
+    assert client.get("/.well-known/agent.json").json()["version"] == service
+    assert json_module.loads((root / "mcp" / "server.json").read_text())["version"] == service
+
+
 def test_the_api_catalog_only_links_paths_this_origin_answers(client):
     """RFC 9727's value is that a crawler can follow it. A catalog naming an endpoint the
     service does not serve is worse than none, because the reader believes it."""
