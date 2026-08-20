@@ -2727,9 +2727,10 @@ def test_the_skills_index_digest_is_of_the_bytes_skill_md_actually_serves(client
 
 def test_the_skill_the_image_and_the_wrapper_all_name_one_version(client):
     """Three artifacts ship from this repo and they are released together, so a reader who
-    has one of them can name the others. The skill is the exception on purpose: its 0.2.0
-    entry disallows extra keys, so its release is named by the agent.json served beside it
-    rather than inside an entry an installer would then refuse."""
+    has one of them can name the others — including the skill, whose entry carries the release
+    it shipped in alongside the digest that identifies its bytes. `version` is outside the five
+    fields Agent Skills Discovery 0.2.0 defines, which the spec provides for: clients MUST
+    ignore fields they do not recognise."""
     import json as json_module
     import tomllib
     from pathlib import Path
@@ -2738,10 +2739,10 @@ def test_the_skill_the_image_and_the_wrapper_all_name_one_version(client):
     service = tomllib.loads((root / "pyproject.toml").read_text())["project"]["version"]
 
     skill = client.get("/.well-known/agent-skills/index.json").json()["skills"][0]
-    assert set(skill) == {"name", "type", "description", "url", "digest"}, (
-        "Agent Skills Discovery 0.2.0 entries disallow additional properties: an extra key "
-        "invalidates the entry rather than annotating it"
-    )
+    assert skill["version"] == service
+    # The five the spec defines are all still there: `version` is additive, and an entry that
+    # dropped one of these would be broken for every client regardless of the extra.
+    assert {"name", "type", "description", "url", "digest"} <= set(skill)
     assert client.get("/openapi.json").json()["info"]["version"] == service
     assert client.get("/.well-known/agent.json").json()["version"] == service
     assert json_module.loads((root / "mcp" / "server.json").read_text())["version"] == service

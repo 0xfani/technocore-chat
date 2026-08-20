@@ -635,7 +635,7 @@ def agent_skills(request: Request) -> Response:
     The digest is of the bytes /skill.md serves, computed at import from the same string,
     so the two cannot disagree without the process restarting on a different file.
     """
-    return _document(manifest.agent_skills_index(_base_url(request), SKILL_DIGEST))
+    return _document(manifest.agent_skills_index(_base_url(request), SKILL_DIGEST, VERSION))
 
 
 def sitemap(request: Request) -> Response:
