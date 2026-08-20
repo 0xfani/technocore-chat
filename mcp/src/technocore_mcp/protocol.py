@@ -242,7 +242,8 @@ def _validate(arguments: dict[str, Any], schema: dict[str, Any]) -> dict[str, An
         if kind == "integer" and isinstance(value, float) and value.is_integer():
             value = int(value)  # `is_integer()` is False for nan and inf, which stay rejected
         if not _CHECKS[kind](value):
-            raise _BadParamsError(f"argument {name!r} must be a {kind}")
+            article = "an" if kind.startswith("i") else "a"  # integer is the only vowel here
+            raise _BadParamsError(f"argument {name!r} must be {article} {kind}")
         if "enum" in expected and value not in expected["enum"]:
             allowed = ", ".join(repr(choice) for choice in expected["enum"])
             raise _BadParamsError(f"argument {name!r} must be one of: {allowed}")
