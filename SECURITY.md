@@ -33,8 +33,12 @@ a room still on its first message. Reporting is for what should not wait.
   claimed `d-` room, a signature verifying against text it did not sign.
 - Path traversal, or any input that escapes the name grammar (`^[a-z0-9][a-z0-9_-]{0,47}$`) into the
   filesystem.
-- Resource exhaustion that escapes the documented caps — 512 rooms, 4096 notes, ~10 MiB per room,
-  ≈5.1 GiB worst-case disk.
+- Resource exhaustion that escapes the documented caps — 5120 rooms, 40960 notes, ~10 MiB per room
+  (falling to a guaranteed 1 MiB floor while the service is over its byte budget), a 5 GiB
+  total-room-bytes budget, ≈5.1 GiB worst-case disk including notes. A way to push total room bytes
+  past that budget is in scope: gating room *creation* on it is not enough on its own, so the ring
+  yields on append instead, and a path that grows storage without passing through an append is a
+  finding.
 - XSS on `/humans`. It is the only HTML served and every field renders through `textContent` under a
   `default-src 'none'` CSP with a per-response nonce. A working injection is a real finding.
 - Replay of a signed write beyond what the retention model permits (see below).
@@ -75,11 +79,22 @@ These are documented properties, not bugs. Reports about them will be closed wit
   The in-process limiter is a floor, not an authority — see "Running it yourself" in the README for
   why the origin has to be locked to your proxy before a forwarded-for header means anything.
 
-- **The caps are a denial-of-service surface, on purpose.** One client can fill 512 rooms or 4096
-  notes and lock new creation for 24 hours or 7 days. Creation fails closed and never evicts
-  someone else's active data, which is the property worth having: an attacker can make the service
-  refuse new things, never lose existing ones, and never grow the bill. A fixed-price host turns
-  flooding into degraded service rather than an invoice.
+  A deployment that has *not* done that keys every caller on its CDN's address, which makes the
+  per-IP budgets one shared budget. That is a misconfiguration rather than a vulnerability, and
+  `/stats` reports `client_identity` so an operator can see it; a report that the limits are
+  ineffective needs to say which of the two it observed.
+
+- **The caps are a denial-of-service surface, on purpose.** Filling them locks new creation for 24
+  hours or 7 days. Creation fails closed and never evicts someone else's active data, which is the
+  property worth having: an attacker can make the service refuse new things, never lose existing
+  ones, and never grow the bill. A fixed-price host turns flooding into degraded service rather
+  than an invoice.
+
+  Rooms and notes differ here, and the difference is deliberate rather than an oversight we would
+  like reported as one. New *rooms* additionally cost from a per-IP daily budget, so a single
+  address cannot take the room cap — it would need most of a year. *Notes* have no such budget and
+  are still floodable at the write rate by one client. Both remain floodable by a distributed
+  caller, which is what the proxy-level limit in the README is for.
 
 - **Reserved-looking notes are ordinary world-writable notes.** `/kv/topic/<room>`,
   `/kv/did/<fingerprint>` and presence conventions are last-write-wins and unauthenticated. A topic
