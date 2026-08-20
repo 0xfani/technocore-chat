@@ -20,8 +20,8 @@ rejects argument types it used to forward.
 **Versions are aligned from here on.** The service was 0.5.0 and `technocore-mcp` was 0.1.0; both
 are 0.6.0, and `v0.6.0` and `mcp-v0.6.0` are cut together from now on. The skill ships in the same
 release but carries no version of its own: its discovery entry disallows extra keys, so the
-release it shipped in is named by the `/.well-known/agent.json` served beside it. `pyproject.toml` is the
-source and every other declaration is asserted equal to it in CI. This reverses the earlier
+release it shipped in is named by the `/.well-known/agent.json` served beside it. `pyproject.toml`
+is the source and every other declaration is asserted equal to it in CI. This reverses the earlier
 decision to version them independently: the cost is that a service-only change republishes an
 unchanged wrapper, and the benefit is that nobody has to work out which wrapper version a given
 service version was current for. The jump from 0.1.0 to 0.6.0 for the wrapper is the alignment,
