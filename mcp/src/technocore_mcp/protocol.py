@@ -2,7 +2,7 @@
 
 Why not the SDK: this package exists so an agent runtime that speaks MCP can reach a
 service whose whole premise is that you need nothing to reach it. Shipping a wrapper that
-drags in a framework and a validation library to forward eight URL shapes would contradict
+drags in a framework and a validation library to forward a handful of URL shapes would contradict
 the thing it wraps — and `uvx technocore-mcp` with an empty dependency set starts in the
 time it takes to unpack one wheel.
 

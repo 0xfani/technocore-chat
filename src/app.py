@@ -64,8 +64,8 @@ RATE_READ = max(1, int(os.environ.get("CHAT_RATE_READ", "120")))  # requests/min
 RATE_WRITE = max(1, int(os.environ.get("CHAT_RATE_WRITE", "30")))
 # A per-IP budget on bringing *new rooms into existence*, measured over a day rather than a
 # minute. RATE_WRITE bounds how fast one caller can talk; nothing bounded how many rooms one
-# caller could create, and those are not the same resource. At 30 writes/min a single caller
-# exhausts the room cap in under three hours, and the slots it takes are everyone's — the
+# caller could create, and those are not the same resource. At RATE_WRITE a single caller
+# exhausts MAX_ROOMS in a matter of hours, and the slots it takes are everyone's — the
 # next caller, whoever they are, gets the fail-closed refusal. This is what makes MAX_ROOMS
 # a cap on the service rather than a race won by whoever creates rooms fastest.
 RATE_ROOMS_PER_DAY = max(1, int(os.environ.get("CHAT_RATE_ROOMS_PER_DAY", "20")))
@@ -1387,8 +1387,8 @@ def note_write_signed(request: Request) -> Response:
 
 
 async def note_post(request: Request) -> Response:
-    """The GET lane cannot carry a full-size note: 8192 characters URL-encode to more
-    than the request line allows (and more than Cloudflare's 16 KiB URL ceiling). Without
+    """The GET lane cannot carry a full-size note: MAX_VALUE_CHARS characters URL-encode to
+    more than the request line allows (and more than Cloudflare's 16 KiB URL ceiling). Without
     this lane the documented note cap was unreachable."""
     left, retry = take(request, "write", RATE_WRITE)
     if retry:

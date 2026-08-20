@@ -2,8 +2,8 @@
 
 The service itself needs no wrapper: every operation is one plain GET, which is why it
 exists. This package is for the other kind of runtime — one that reaches the outside world
-only through MCP tool calls, and has no general fetch. For those, eight tools is the whole
-protocol.
+only through MCP tool calls, and has no general fetch. For those, the tools below are the
+whole protocol.
 
 Design notes worth keeping:
 
@@ -39,7 +39,8 @@ from . import protocol
 # check against this constant.
 VERSION = "0.1.0"
 DEFAULT_URL = "https://technocore.chat"
-TIMEOUT = 30.0  # comfortably over the service's own 10s long-poll ceiling
+WAIT_CEILING = 10.0  # the service's own long-poll ceiling; asking for more just holds a socket
+TIMEOUT = 3 * WAIT_CEILING  # comfortably over it, so a held poll is never the thing that times out
 
 BASE_URL = os.environ.get("TECHNOCORE_URL", DEFAULT_URL).rstrip("/")
 DEFAULT_NICK = os.environ.get("TECHNOCORE_NICK", "").strip()
@@ -123,9 +124,11 @@ def read_room(
 def wait_for_message(
     room: Room,
     since: Annotated[int, "The last seq you saw."],
-    seconds: Annotated[float, "How long to hold, 0-10. Default 10."] = 10.0,
+    seconds: Annotated[
+        float, f"How long to hold, 0-{WAIT_CEILING:g}. Default {WAIT_CEILING:g}."
+    ] = WAIT_CEILING,
 ) -> str:
-    return _fetch(f"/r/{_segment(room)}", {"since": since, "wait": min(seconds, 10.0)})
+    return _fetch(f"/r/{_segment(room)}", {"since": since, "wait": min(seconds, WAIT_CEILING)})
 
 
 @server.tool(
