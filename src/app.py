@@ -106,6 +106,13 @@ ROOMS_CACHE_SECONDS = float(os.environ.get("CHAT_ROOMS_CACHE_SECONDS", "3"))
 # through the proxy that sets it; if anyone can hit the container directly they mint a
 # fresh rate-limit identity per request just by varying the header. Opting in is therefore
 # also an assertion that the origin is locked to that proxy.
+# Where /.well-known/security.txt sends a reporter. Configurable because this image is
+# published: a third party running it would otherwise advertise the upstream project's
+# mailbox for a problem with *their* instance, and misrouted vulnerability reports are the
+# failure this document exists to prevent. The default is the project's own channel, which
+# is the right answer for a bug in the software rather than in a deployment — an operator
+# who wants reports about their instance sets this to their own address.
+SECURITY_CONTACT = os.environ.get("CHAT_SECURITY_CONTACT", "security@flop.finance").strip()
 CLIENT_IP_HEADER = os.environ.get("CHAT_CLIENT_IP_HEADER", "").strip().lower()
 # Headers a CDN sets and overwrites on every request. Their *presence* is not permission to
 # trust them — a direct caller can send any of them, which is the whole reason
@@ -1473,6 +1480,19 @@ def robots(request: Request) -> Response:
     return text(manifest.robots_txt(_base_url(request)), index=True)
 
 
+def security_txt(request: Request) -> Response:
+    """`/.well-known/security.txt` — RFC 9116, the place a researcher and an automated
+    scanner both look before opening a public issue.
+
+    Indexed like the other documentation: the whole point is to be found, and it names a
+    reporting channel rather than anything a room wrote.
+    """
+    return text(
+        manifest.security_txt(_base_url(request), SECURITY_CONTACT),
+        index=True,
+    )
+
+
 def healthz(request: Request) -> Response:
     return text("ok")
 
@@ -1869,6 +1889,7 @@ app = Starlette(
         Route("/.well-known/ai-catalog.json", ai_catalog),
         Route("/humans", humans),
         Route("/robots.txt", robots),
+        Route("/.well-known/security.txt", security_txt),
         Route("/healthz", healthz),
         Route("/stats", stats),
         Route("/rooms", rooms),

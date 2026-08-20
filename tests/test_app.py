@@ -371,6 +371,47 @@ def test_only_the_request_that_creates_a_room_pays_for_it(client, monkeypatch):
     assert client.get("/r/fourth-room/say/bot/hi").status_code == 429
 
 
+def test_security_txt_is_a_valid_rfc_9116_document(client):
+    """The place a researcher and an automated scanner both look before opening a public
+    issue. It is only useful if it parses and if `Expires` has not passed."""
+    from datetime import UTC, datetime
+
+    r = client.get("/.well-known/security.txt")
+    assert r.status_code == 200
+    assert r.headers["content-type"].startswith("text/plain")
+    assert "noindex" not in r.headers.get("x-robots-tag", "")  # being found is the point
+
+    fields: dict[str, list[str]] = {}
+    for raw in r.text.splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        name, _, value = line.partition(":")
+        assert value.strip(), f"field {name!r} has no value"
+        fields.setdefault(name.strip().lower(), []).append(value.strip())
+
+    assert fields["contact"], "Contact is the one field RFC 9116 cannot do without"
+    assert len(fields["expires"]) == 1, "RFC 9116: exactly one Expires"
+    expires = datetime.strptime(fields["expires"][0], "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=UTC)
+    ahead = expires - datetime.now(UTC)
+    assert ahead.days > 0, "an expired security.txt reads as an abandoned channel"
+    assert ahead.days < 366, "RFC 9116: Expires should be under a year out"
+    # The advisory form is listed first: it is the monitored channel and it keeps a report
+    # private until there is a fix. The mailbox is the route for anyone without an account.
+    assert fields["contact"][0].startswith("https://")
+    assert any(c.startswith("mailto:") for c in fields["contact"])
+    assert fields["policy"]
+
+
+def test_the_security_contact_is_the_operators_to_set(client, monkeypatch):
+    """This image is published. A third party running it must not end up advertising the
+    upstream project's mailbox for a problem with their own deployment."""
+    import app as app_module
+
+    monkeypatch.setattr(app_module, "SECURITY_CONTACT", "someone@example.org")
+    assert "mailto:someone@example.org" in client.get("/.well-known/security.txt").text
+
+
 def test_the_served_manual_states_the_caps_it_actually_enforces(client):
     """/llms.txt tells agents it is the complete protocol, so a number in it that disagrees
     with the enforced constant is worse than no number. Prose said "512 rooms, 4096 notes"

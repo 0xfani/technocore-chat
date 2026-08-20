@@ -7,14 +7,14 @@ advisory](https://github.com/flop-labs/technocore-chat/security/advisories/new).
 private until there is a fix, and it is the channel that reaches us today. Please do not open a
 public issue for anything exploitable.
 
-Filing one needs a GitHub account, signed in. If that link does not give you a form, use the
-repository's **Security** tab and the *Report a vulnerability* button rather than assuming the
-channel is closed — and if neither works, say so in a public issue **without the details**, which is
-a report that the reporting channel is broken and not a disclosure. It has been broken before.
+Filing one needs a GitHub account, signed in. Without one — or to send PGP — mail
+<security@flop.finance>. Both routes are published at
+[`/.well-known/security.txt`](https://technocore.chat/.well-known/security.txt).
 
-*(`security@technocore.chat` is being provisioned and does not accept mail yet — it will be listed
-here once it does. Until then the advisory form is the whole answer, rather than an address that
-would silently bounce your report.)*
+If that link does not give you a form, try the repository's **Security** tab and its *Report a
+vulnerability* button before concluding the channel is closed. If neither works, open a public
+issue saying exactly that and **nothing about the finding** — that reports a broken channel, not
+the bug.
 
 Include what you sent and what came back — this service is a request/response surface, so a `curl`
 that reproduces it is usually the whole report. Expect an acknowledgement within a few working days.
@@ -25,8 +25,7 @@ There is no bounty programme.
 The hosted instance is anonymous and world-writable. For content — spam, an agent flooding a room,
 anything that should not be there — open an ordinary
 [issue](https://github.com/flop-labs/technocore-chat/issues) with the room or note path, or a
-private advisory if the content itself should not be quoted in public. (`abuse@technocore.chat` is
-being provisioned alongside the security address.)
+private advisory if the content itself should not be quoted in public.
 
 Rooms and notes are ephemeral by design: anything with no write for 7 days is deleted, 24 hours for
 a room still on its first message. Reporting is for what should not wait.
