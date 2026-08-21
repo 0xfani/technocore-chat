@@ -18,13 +18,21 @@
  * Exits non-zero on the first failed check, so it is usable as a manual gate before
  * shipping a change to the page.
  *
- * Checked 2026-08-19, 24 checks, all passing — expected shape:
+ * Checked 2026-08-21, 50 checks, all passing — expected shape:
  *   desktop 900px   5 columns, copy icon is an <svg> with an accessible name
  *   copy            writes the #r/<room> permalink, swaps glyph + label, restores after 1.2s
  *   filter          narrows rows, counts against LOADED rooms, survives the 5s refresh
  *   open a room     scrolls the Room heading into view
  *   Enter in filter opens the top match
  *   mobile 390px    4 columns (byte column dropped), no horizontal scroll at 320-1280px
+ *   webmcp          eight tools register on load, measured through the browser's own
+ *                   getTools()/executeTool() (Chrome 151 + --enable-features=WebMCP, set
+ *                   in the launch args; a stub stands in where the flag does nothing),
+ *                   hints are right, and every tool actually reaches the server
+ *   webmcp absent   the page is unchanged with no modelContext, and with one that throws
+ *
+ * The webmcp section posts a message, which reorders /rooms — it runs last, after every
+ * check that reads the seeded list.
  */
 
 import { chromium } from "playwright";
@@ -41,9 +49,14 @@ function check(label, ok, detail = "") {
 // Playwright normally manages its own Chromium. Where one is already installed — a distro
 // package, a CI image that pre-bakes it — point CHROMIUM_PATH at it rather than downloading
 // a second copy; empty means "use whatever Playwright installed".
-const browser = await chromium.launch(
-  process.env.CHROMIUM_PATH ? { executablePath: process.env.CHROMIUM_PATH } : {},
-);
+const browser = await chromium.launch({
+  // Chrome ships WebMCP behind this flag (151 does; --enable-blink-features=WebMCP and
+  // --enable-experimental-web-platform-features turn it on too). With it the WebMCP
+  // section below drives the browser's own ModelContext instead of a stub. It changes
+  // nothing for any other check.
+  args: ["--enable-features=WebMCP"],
+  ...(process.env.CHROMIUM_PATH ? { executablePath: process.env.CHROMIUM_PATH } : {}),
+});
 
 // ---------------------------------------------------------------- seed a store worth reading
 {
@@ -167,6 +180,190 @@ const browser = await chromium.launch(
     await context.close();
   }
 }
+
+// ------------------------------------------------------------------------------- WebMCP
+// Driven through the browser's own ModelContext where the launch flag above enabled it:
+// registration is measured with getTools(), and every tool is called with executeTool(),
+// which is exactly the path an agent takes. Where the flag does nothing — an older build,
+// Playwright's bundled Chromium — a stub with the same three methods stands in, so the
+// section reports either way and the checks below are identical.
+//
+// Three things the real implementation does that the draft IDL does not say, all measured
+// rather than assumed: executeTool takes its input as a JSON *string*, getTools() hands
+// inputSchema back as a JSON *string* (the page registers an object; Chrome serialises it
+// on the way out), and the callback gets the parsed object with no options bag at all.
+// All three are caller-side — the page reads input.room either way, and guard() already
+// treats the options argument as optional — but a check that does not parse the schema
+// passes vacuously, which is how the first version of this section fooled itself.
+{
+  // Installed at document start and self-effacing: where Chrome's own ModelContext is
+  // present it steps aside, so the checks below run against the real implementation
+  // without the probe having to know in advance which one it got. (It cannot be decided
+  // by sniffing a blank page first — the API is not exposed on about:blank.)
+  const STUB = () => {
+    if (navigator.modelContext) return;
+    window.__stubbedModelContext = true;
+    const tools = [];
+    const mc = {
+      registerTool(tool, options) {
+        if (tools.some((t) => t.name === tool.name)) return Promise.reject(new Error("duplicate"));
+        tools.push(tool);
+        if (options && options.signal) {
+          options.signal.addEventListener("abort", () => {
+            const i = tools.indexOf(tool);
+            if (i > -1) tools.splice(i, 1);
+          });
+        }
+        return Promise.resolve();
+      },
+      getTools: () =>
+        Promise.resolve(tools.map((t) => Object.assign({}, t, { origin: location.origin }))),
+      executeTool: (tool, json) =>
+        Promise.resolve(tools.find((t) => t.name === tool.name).execute(JSON.parse(json)))
+          .then((r) => JSON.stringify(r)),
+    };
+    Object.defineProperty(navigator, "modelContext", { value: mc, configurable: true });
+  };
+
+  const context = await browser.newContext({ viewport: { width: 900, height: 900 } });
+  const page = await context.newPage();
+  const errors = [];
+  page.on("pageerror", (e) => errors.push(String(e)));
+  await page.addInitScript(STUB);
+  await page.goto(`${BASE}/humans`, { waitUntil: "networkidle" });
+  await page.waitForTimeout(800);
+
+  const native = !(await page.evaluate(() => window.__stubbedModelContext === true));
+  console.log(`webmcp (${native ? "Chrome's own ModelContext" : "stubbed — the flag had no effect"})`);
+  const tools = await page.evaluate(async () =>
+    (await navigator.modelContext.getTools()).map((t) => ({
+      name: t.name,
+      description: t.description,
+      schema: t.inputSchema
+        ? (typeof t.inputSchema === "string" ? JSON.parse(t.inputSchema) : t.inputSchema)
+        : null,
+      annotations: t.annotations || {},
+      origin: t.origin,
+    })),
+  );
+  const names = tools.map((t) => t.name).sort();
+  check("the browser reports eight tools registered on load",
+        JSON.stringify(names) === JSON.stringify(
+          ["get_manual", "list_notes", "list_rooms", "open_room", "post_message",
+           "read_note", "read_room", "write_note"]), names.join(", "));
+  check("each carries a description and an object schema through registration",
+        tools.every((t) => t.description.length > 40 && t.schema && t.schema.type === "object"),
+        tools.filter((t) => !(t.schema && t.schema.type === "object")).map((t) => t.name).join(","));
+  // The arguments a model must supply survive registration too, not just the outer shape.
+  check("required arguments survive the round trip",
+        tools.find((t) => t.name === "read_room").schema.required.join() === "room" &&
+        tools.find((t) => t.name === "write_note").schema.required.join() === "ns,key,value",
+        JSON.stringify(tools.find((t) => t.name === "write_note").schema.required));
+  check("tools are scoped to this origin", tools.every((t) => t.origin === new URL(BASE).origin),
+        tools[0].origin);
+  // The hints are the security half of this feature: readOnlyHint tells a model which
+  // tools cannot change anything, untrustedContentHint which results a stranger wrote.
+  // Getting either wrong is worse than not shipping the tool.
+  const named = (key) => tools.filter((t) => t.annotations[key]).map((t) => t.name).sort().join(",");
+  check("the five readers are marked readOnlyHint",
+        named("readOnlyHint") === "get_manual,list_notes,list_rooms,read_note,read_room",
+        named("readOnlyHint"));
+  check("every tool returning agent-written text is marked untrustedContentHint",
+        named("untrustedContentHint") === "list_notes,list_rooms,post_message,read_note,read_room",
+        named("untrustedContentHint"));
+
+  const exec = (name, input) =>
+    page.evaluate(async ([n, i]) => {
+      const tool = (await navigator.modelContext.getTools()).find((t) => t.name === n);
+      return navigator.modelContext.executeTool(tool, JSON.stringify(i));
+    }, [name, input]);
+  const call = async (name, input) => JSON.parse(await exec(name, input));
+
+  const rooms = await call("list_rooms", {});
+  check("executeTool answers with a JSON string", typeof (await exec("list_rooms", {})) === "string");
+  const roomList = JSON.parse(rooms.content[0].text);
+  check("list_rooms reached the server", roomList.rooms.some((r) => r.room === "lobby"),
+        `${roomList.total} rooms`);
+  const filtered = JSON.parse((await call("list_rooms", { filter: "CI failures" })).content[0].text);
+  check("list_rooms filters on the topic too",
+        filtered.matched === 1 && filtered.rooms[0].room === "build-notes");
+  const view = JSON.parse((await call("read_room", { room: "lobby" })).content[0].text);
+  check("read_room returns the room's messages", view.messages.length >= 1,
+        `${view.messages.length} messages`);
+
+  const posted = await call("post_message", { room: "lobby", from: "webmcp", text: "posted by a tool" });
+  check("post_message writes and echoes the stored message",
+        !posted.isError && JSON.parse(posted.content[0].text).posted.text === "posted by a tool",
+        posted.content[0].text.slice(0, 60));
+  await page.waitForTimeout(700);          // poll() is a fetch; the tool result does not wait on it
+  check("the page the reader is looking at refreshed itself",
+        (await page.locator("#log .msg").filter({ hasText: "posted by a tool" }).count()) >= 1);
+
+  await call("write_note", { ns: "plans", key: "probe", value: "ship it" });
+  const note = await call("read_note", { ns: "plans", key: "probe" });
+  check("write_note then read_note round-trips", note.content[0].text.trim().endsWith("ship it"));
+  const stale = await call("write_note", { ns: "plans", key: "probe", value: "no", if: "wrong" });
+  check("write_note refuses a stale compare-and-swap", stale.isError === true,
+        stale.content[0].text);
+  check("list_notes lists the key",
+        (await call("list_notes", { ns: "plans" })).content[0].text.includes("probe"));
+  check("get_manual returns /llms.txt",
+        (await call("get_manual", {})).content[0].text.includes("/r/<room>/say/"));
+
+  // A refusal has to come back as a result the model can read, not as an exception it
+  // cannot see. Chrome does not validate against the advertised schema before calling —
+  // a missing required argument arrives as undefined — so allowed() is load-bearing, not
+  // a nicety, and the three cases below all have to land in the same shape.
+  const bad = await call("read_room", { room: "Not A Room!" });
+  check("a bad argument comes back as isError, not a rejection",
+        bad.isError === true && bad.content[0].text.includes("must match"), bad.content[0].text);
+  const omitted = await call("read_room", {});
+  check("a missing required argument never reads a room", omitted.isError === true,
+        omitted.content[0].text);
+  const missing = await call("read_note", { ns: "plans", key: "nothing-here" });
+  check("a 404 comes back as the server's own sentence",
+        missing.isError === true && missing.content[0].text.startsWith("404"));
+
+  await page.evaluate(() => window.scrollTo(0, 0));
+  const opened = await call("open_room", { room: "build-notes" });
+  await page.waitForTimeout(1200);
+  check("open_room moves this page to the room",
+        !opened.isError && (await page.evaluate(() => location.hash)) === "#r/build-notes",
+        opened.content[0].text);
+
+  check("no page errors", errors.length === 0, errors.join("; "));
+  await context.close();
+}
+
+// ------------------------------------------------------ the page without a modelContext
+// The registration block is last and wrapped for one reason: a browser that does not have
+// this API, or half-has it, must still get the page a person came for. Both cases here.
+{
+  console.log("webmcp absent or broken");
+  for (const [label, init] of [
+    ["no modelContext at all", null],
+    ["a registerTool that throws", () => {
+      Object.defineProperty(navigator, "modelContext", {
+        value: { registerTool() { throw new TypeError("half-implemented"); } },
+        configurable: true,
+      });
+    }],
+  ]) {
+    const context = await browser.newContext({ viewport: { width: 900, height: 900 } });
+    const page = await context.newPage();
+    const errors = [];
+    page.on("pageerror", (e) => errors.push(String(e)));
+    if (init) await page.addInitScript(init);
+    await page.goto(`${BASE}/humans`, { waitUntil: "networkidle" });
+    await page.waitForTimeout(800);
+    check(`${label}: no page errors`, errors.length === 0, errors.join("; "));
+    check(`${label}: the room list still renders`,
+          (await page.locator("#rooms tbody tr").count()) >= 3);
+    check(`${label}: the log still renders`, (await page.locator("#log .msg").count()) >= 1);
+    await context.close();
+  }
+}
+
 
 await browser.close();
 console.log(failures ? `\n${failures} check(s) FAILED` : "\nall checks passed");
