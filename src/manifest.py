@@ -1237,8 +1237,9 @@ def agent_skills_index(base: str, skill_digest: str, version: str) -> dict:
 
 
 def link_header(base: str) -> str:
-    """RFC 8288 `Link` for the document responses: the same three pointers the api-catalog
-    carries, in the header a crawler sees without parsing a body."""
+    """RFC 8288 `Link` for every response that describes this service — the document
+    lanes and /humans: the same three pointers the api-catalog carries, in the header a
+    crawler sees without parsing a body."""
     return ", ".join(
         (
             f'<{_url(base, "/openapi.json")}>; rel="service-desc"; type="application/json"',

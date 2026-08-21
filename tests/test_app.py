@@ -870,6 +870,114 @@ def test_humans_page_pins_its_inline_code_with_a_fresh_nonce(client):
     assert r1.headers["content-security-policy"] != r2.headers["content-security-policy"]
 
 
+def test_the_human_page_points_at_the_protocol_in_its_headers(client):
+    """The page a browser-driving agent now lands on has to be findable *from*, not only
+    readable. It carries the same `Link` the document lanes do, so "where is the manual"
+    is answerable from the response headers — without running the page's script, parsing
+    its footer, or calling the get_manual tool.
+    """
+    page, manual = client.get("/humans"), client.get("/llms.txt")
+    # One value from one builder: two hand-kept lists of the same three pointers is the
+    # drift this asserts away.
+    assert page.headers["Link"] == manual.headers["Link"]
+    for relation in ("service-desc", "service-doc", "api-catalog"):
+        assert f'rel="{relation}"' in page.headers["Link"]
+
+    # A pointer to a 404 is worse than no pointer, because the reader believes it.
+    for link in page.headers["Link"].split(", "):
+        url = link.split(">")[0].lstrip("<")
+        assert url.startswith("http://testserver"), url
+        assert client.get(url.split("testserver", 1)[1]).status_code == 200, url
+
+    # And none of them is a relation a browser acts on. preload, prefetch and stylesheet
+    # in a header become requests, which is exactly what a page whose CSP is
+    # `default-src 'none'` must never ask for.
+    assert not any(
+        rel in page.headers["Link"] for rel in ("preload", "prefetch", "preconnect", "stylesheet")
+    )
+    # The header adds no reach: every path in it is already an anchor in the page itself.
+    assert '<a href="/llms.txt">' in page.text and 'href="/openapi.json"' in page.text
+
+
+def test_the_note_framing_the_human_page_parses_is_a_contract(client, monkeypatch):
+    """/kv/<ns>/<key> is the one read lane with no JSON form, so the page's read_note tool
+    parses the plain one: banner, blank line, value, and — only once the read budget is
+    nearly spent — a trailing `# budget:` line. That layout is now a contract between two
+    files. Move it and the tool starts handing a model the banner instead of the value,
+    and the read-modify-write loop stops terminating rather than failing loudly, which is
+    the failure mode worth a test.
+    """
+    import app as app_module
+
+    client.get("/kv/plans/next/set/ship%20it")
+    lines = client.get("/kv/plans/next").text.split("\n")
+    assert lines[0] == app_module.BANNER
+    assert lines[1] == ""
+    assert lines[2] == "ship it"
+
+    # A note value is single-line by construction — clean_text collapses newlines on the
+    # way in — which is what makes "everything after the blank line" a safe rule. Asserted
+    # through POST because that is the only lane that can carry one: %0A in the GET path
+    # matches no route at all, so the write never reaches the store.
+    assert client.get("/kv/plans/folded/set/a%0Ab").status_code == 404
+    assert client.post("/kv/plans/folded", json={"value": "a\nb"}).status_code == 200
+    assert client.get("/kv/plans/folded").text.split("\n")[2] == "a b"
+
+    # The warning goes last, after the value, and nothing follows it: that is what lets
+    # the page drop it by inspecting the final line alone.
+    monkeypatch.setattr(app_module, "RATE_READ", 8)
+    for _ in range(5):
+        client.get("/kv/plans/next")
+    warned = client.get("/kv/plans/next").text.rstrip("\n").split("\n")
+    assert warned[2] == "ship it"
+    assert warned[-1].startswith("# budget:")
+
+
+def test_a_lost_conditional_write_carries_the_value_after_the_first_line(client):
+    """The manual promises a 409 lets you rebase without re-reading, and the page's tool
+    lane stopped truncating error bodies so write_note can keep that promise. Pin where
+    the value actually is: the first line is the sentence, the value is the last line.
+    """
+    client.get("/kv/plans/next/set/world")
+    lost = client.get("/kv/plans/next/set/nope?if=stale")
+    assert lost.status_code == 409
+    lines = lost.text.rstrip("\n").split("\n")
+    assert lines[0].startswith("409") and "world" not in lines[0]
+    assert lines[-1] == "world"
+
+
+def test_webmcp_tool_results_carry_the_whole_server_reply(client):
+    """A one-line squeeze used to live in the tool lane, and it dropped the value a 409
+    carries. The status badge above still takes a first line — it has one line to render —
+    so this is asserted at the tool lane rather than page-wide.
+    """
+    body = client.get("/humans").text
+    assert "throw new Error(body.trim()" in body
+    assert "function noteValue(body)" in body
+    assert ".then(function (body) { return result(noteValue(body)); })" in body
+
+
+def test_a_budget_warning_never_reaches_the_json_lane(client, monkeypatch):
+    """`respond` appends the budget note to the plain-text branch only, and the page's
+    post_message and read_room tools parse the JSON one. A note glued onto JSON would not
+    degrade, it would stop parsing — and only once a caller was near its limit, which is
+    the worst moment to discover it. Pinned because the number of `note=` callers grew.
+    """
+    import app as app_module
+
+    monkeypatch.setattr(app_module, "RATE_WRITE", 8)
+    for _ in range(6):
+        client.post("/r/lobby", json={"from": "a", "text": "x"})
+
+    posted = client.post("/r/lobby?format=json", json={"from": "a", "text": "final"})
+    assert posted.headers["content-type"].startswith("application/json")
+    assert posted.json()["posted"]["text"] == "final"
+    assert "# budget:" not in posted.text
+
+    # The warning is not lost, it belongs to the lane that can carry it.
+    assert "# budget:" in client.post("/r/lobby", json={"from": "a", "text": "y"}).text
+
+
 def test_agent_surfaces_are_never_html(client):
     client.get("/r/lobby/say/bot/hi")
     for path in ("/", "/llms.txt", "/robots.txt", "/r/lobby", "/rooms", "/healthz"):
@@ -2221,6 +2329,100 @@ def test_the_human_page_shares_by_copying_a_fragment_permalink(client):
     assert "since = targetSeq ? targetSeq - 1 : 0" in body
     # and a shared message still shows where it came from, exactly like the text view
     assert "'~' + m.from" in body and "did:key:z" in body
+
+
+# ------------------------------------------------------------------ /humans WebMCP tools
+
+
+def _webmcp_tools(body: str) -> dict[str, str]:
+    """Every tool in the page's TOOLS array, as name -> its annotations text.
+
+    Parsed rather than string-counted: what matters about a tool is which name got which
+    hint, and `body.count("untrustedContentHint")` cannot tell you that. The registerTool
+    call itself passes `name: t.name` and `annotations: t.annotations`, neither of which
+    matches — only the literals do.
+    """
+    import re as _re
+
+    return dict(_re.findall(r"name: '([a-z_]+)',.*?annotations: \{([^}]*)\}", body, _re.S))
+
+
+def test_the_human_page_hands_its_tools_to_an_agent_driving_the_browser(client):
+    """WebMCP: an agent inside the tab gets named, schema'd actions instead of a rendering
+    to squint at. Byte assertions only — whether a registration ever happens is a question
+    about a running browser, and tests/humans_ui_probe.mjs is where that is answered."""
+    body = client.get("/humans").text
+
+    # navigator is where Chrome's preview puts it, document is where the draft spec does.
+    assert "navigator.modelContext" in body and "document.modelContext" in body
+    assert "mc.registerTool({" in body
+    # Feature-detected, so a browser with neither gets the page exactly as it was.
+    assert "typeof mc.registerTool === 'function'" in body
+
+    tools = _webmcp_tools(body)
+    assert set(tools) == {
+        "list_rooms",
+        "read_room",
+        "post_message",
+        "open_room",
+        "list_notes",
+        "read_note",
+        "write_note",
+        "get_manual",
+    }
+    # Each tool is a description and a schema, not a bare callable: `execute` alone tells a
+    # model nothing about what to pass or what it is for.
+    assert body.count("inputSchema: {") == len(tools)
+    assert body.count("description:\n") + body.count("description: '") >= len(tools)
+    assert "execute: guard(t.run)" in body
+
+
+def test_webmcp_tools_say_which_results_a_stranger_wrote(client):
+    """The security half of the feature, and the reason it belongs on this page at all.
+
+    readOnlyHint tells a model which of these cannot change anything. untrustedContentHint
+    is the box at the top of the page said where a model will read it — and it has to be on
+    every tool whose *result* carries agent-written text, which includes post_message: the
+    server answers a write by echoing the room back.
+    """
+    tools = _webmcp_tools(client.get("/humans").text)
+    readers = {n for n, ann in tools.items() if "readOnlyHint: true" in ann}
+    untrusted = {n for n, ann in tools.items() if "untrustedContentHint: true" in ann}
+
+    assert readers == {"list_rooms", "read_room", "list_notes", "read_note", "get_manual"}
+    assert untrusted == {"list_rooms", "read_room", "post_message", "list_notes", "read_note"}
+    # get_manual is the one reader that is not untrusted: /llms.txt is written by the
+    # server, and a model that cannot trust the manual cannot trust anything here.
+    assert "untrustedContentHint" not in tools["get_manual"]
+    # open_room changes what a person sees, so it is not read-only; it returns no room text.
+    assert tools["open_room"] == tools["post_message"].replace(", untrustedContentHint: true", "")
+
+
+def test_webmcp_registration_is_torn_down_through_an_abort_signal(client):
+    body = client.get("/humans").text
+    assert "new AbortController()" in body and "signal: batch.signal" in body
+    assert "exposed.abort();" in body
+    # bfcache only: a document that is really unloading takes its tools with it, and a
+    # reader who presses Back must not find them gone.
+    assert "if (ev.persisted) withdraw();" in body and "if (ev.persisted) expose();" in body
+    # Last, and wrapped — a half-implemented modelContext must not take the page with it.
+    assert "try { expose(); } catch" in body
+    assert body.index("try { expose(); } catch") > body.index("loadRooms();")
+
+
+def test_webmcp_exposes_no_authority_the_service_did_not_already_give_away(client):
+    """Every route these tools call is one anyone can call unauthenticated — that is the
+    whole argument for shipping them, so the two surfaces that are *not* like that stay
+    out: the signed lanes need a private key a page does not have, and /stats needs a
+    token this page is never given.
+    """
+    body = client.get("/humans").text
+    tool_block = body[body.index("var TOOLS = [") : body.index("try { expose(); } catch")]
+    assert "say-signed" not in tool_block and "set-signed" not in tool_block
+    assert "/stats" not in tool_block and "X-Stats-Token" not in tool_block
+    # And nothing in the block navigates or builds an element — same rule as the rest of
+    # the page, now that a model can call into it.
+    assert "createElement" not in tool_block and "location.href" not in tool_block
 
 
 # -------------------------------------------------------------- /patterns.md + E2E
