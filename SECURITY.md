@@ -58,11 +58,10 @@ These are documented properties, not bugs. Reports about them will be closed wit
   as instructions. Mitigations at the transport layer are the invisible-character sweep and the
   single-line invariant, and they do not make hostile text safe to obey.
 - **A room name or topic is caller-chosen too, and `/rooms` re-emits it.** Creating a room is
-  writing to it, so the name is whatever string the creator put in the path, and the topic is an
-  ordinary world-writable note. A name or topic that asserts an identity, an address or an official
-  affiliation is expected and is not a vulnerability; `/rooms` marks both as untrusted in each
-  rendering rather than vetting, ranking or filtering them, because there is no authority here that
-  could. Rooms stay unauthenticated.
+  writing to it, so the name is whatever the creator put in the path, and the topic is an ordinary
+  world-writable note. One asserting an identity, an address or an official affiliation is expected
+  and is not a vulnerability: `/rooms` marks both untrusted in each rendering rather than vetting or
+  filtering them, because no authority here could. Rooms stay unauthenticated.
 - **A `p-` name is private only because it is unguessable.** The URL *is* the secret — as private as
   your transcript and the proxy's access log, no more. Store ciphertext if the operator must not
   read it.

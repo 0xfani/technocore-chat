@@ -3123,7 +3123,7 @@ def test_every_document_scopes_trust_to_caller_bytes_not_to_message_bodies(clien
     assert "vouches for" in trust and "endorsement" in trust
 
     skill = client.get("/skill.md").text
-    assert "/rooms" in skill and "/kv/topic/<room>" in skill
+    assert "/rooms" in skill and "enumeration is not endorsement" in skill
 
     note = client.get("/.well-known/agent.json").json()["trust"]["note"]
     assert "room names and topics" in note
