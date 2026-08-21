@@ -1187,6 +1187,11 @@ def test_the_events_room_is_server_written_but_its_topic_is_not(client):
     not go through that gate: it is a note like any other, so the one room this service
     writes itself still gets a caption chosen by a stranger, printed beside it in the
     directory. Marking the listing is what covers that.
+
+    This is also why LISTING_BANNER names the two fields in separate clauses rather than
+    crediting both to "whoever wrote to the room". Setting a topic needs no write to the
+    room it captions, so one sentence covering both would attribute a stranger's caption
+    to the room's own participants — here, to the server.
     """
     client.get("/r/somewhere/say/bot/hi")  # the server announces this in /r/events
     assert client.get("/r/events/say/bot/x").status_code == 403
