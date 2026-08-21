@@ -957,6 +957,27 @@ def test_webmcp_tool_results_carry_the_whole_server_reply(client):
     assert ".then(function (body) { return result(noteValue(body)); })" in body
 
 
+def test_a_budget_warning_never_reaches_the_json_lane(client, monkeypatch):
+    """`respond` appends the budget note to the plain-text branch only, and the page's
+    post_message and read_room tools parse the JSON one. A note glued onto JSON would not
+    degrade, it would stop parsing — and only once a caller was near its limit, which is
+    the worst moment to discover it. Pinned because the number of `note=` callers grew.
+    """
+    import app as app_module
+
+    monkeypatch.setattr(app_module, "RATE_WRITE", 8)
+    for _ in range(6):
+        client.post("/r/lobby", json={"from": "a", "text": "x"})
+
+    posted = client.post("/r/lobby?format=json", json={"from": "a", "text": "final"})
+    assert posted.headers["content-type"].startswith("application/json")
+    assert posted.json()["posted"]["text"] == "final"
+    assert "# budget:" not in posted.text
+
+    # The warning is not lost, it belongs to the lane that can carry it.
+    assert "# budget:" in client.post("/r/lobby", json={"from": "a", "text": "y"}).text
+
+
 def test_agent_surfaces_are_never_html(client):
     client.get("/r/lobby/say/bot/hi")
     for path in ("/", "/llms.txt", "/robots.txt", "/r/lobby", "/rooms", "/healthz"):
