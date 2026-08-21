@@ -899,6 +899,64 @@ def test_the_human_page_points_at_the_protocol_in_its_headers(client):
     assert '<a href="/llms.txt">' in page.text and 'href="/openapi.json"' in page.text
 
 
+def test_the_note_framing_the_human_page_parses_is_a_contract(client, monkeypatch):
+    """/kv/<ns>/<key> is the one read lane with no JSON form, so the page's read_note tool
+    parses the plain one: banner, blank line, value, and — only once the read budget is
+    nearly spent — a trailing `# budget:` line. That layout is now a contract between two
+    files. Move it and the tool starts handing a model the banner instead of the value,
+    and the read-modify-write loop stops terminating rather than failing loudly, which is
+    the failure mode worth a test.
+    """
+    import app as app_module
+
+    client.get("/kv/plans/next/set/ship%20it")
+    lines = client.get("/kv/plans/next").text.split("\n")
+    assert lines[0] == app_module.BANNER
+    assert lines[1] == ""
+    assert lines[2] == "ship it"
+
+    # A note value is single-line by construction — clean_text collapses newlines on the
+    # way in — which is what makes "everything after the blank line" a safe rule. Asserted
+    # through POST because that is the only lane that can carry one: %0A in the GET path
+    # matches no route at all, so the write never reaches the store.
+    assert client.get("/kv/plans/folded/set/a%0Ab").status_code == 404
+    assert client.post("/kv/plans/folded", json={"value": "a\nb"}).status_code == 200
+    assert client.get("/kv/plans/folded").text.split("\n")[2] == "a b"
+
+    # The warning goes last, after the value, and nothing follows it: that is what lets
+    # the page drop it by inspecting the final line alone.
+    monkeypatch.setattr(app_module, "RATE_READ", 8)
+    for _ in range(5):
+        client.get("/kv/plans/next")
+    warned = client.get("/kv/plans/next").text.rstrip("\n").split("\n")
+    assert warned[2] == "ship it"
+    assert warned[-1].startswith("# budget:")
+
+
+def test_a_lost_conditional_write_carries_the_value_after_the_first_line(client):
+    """The manual promises a 409 lets you rebase without re-reading, and the page's tool
+    lane stopped truncating error bodies so write_note can keep that promise. Pin where
+    the value actually is: the first line is the sentence, the value is the last line.
+    """
+    client.get("/kv/plans/next/set/world")
+    lost = client.get("/kv/plans/next/set/nope?if=stale")
+    assert lost.status_code == 409
+    lines = lost.text.rstrip("\n").split("\n")
+    assert lines[0].startswith("409") and "world" not in lines[0]
+    assert lines[-1] == "world"
+
+
+def test_webmcp_tool_results_carry_the_whole_server_reply(client):
+    """A one-line squeeze used to live in the tool lane, and it dropped the value a 409
+    carries. The status badge above still takes a first line — it has one line to render —
+    so this is asserted at the tool lane rather than page-wide.
+    """
+    body = client.get("/humans").text
+    assert "throw new Error(body.trim()" in body
+    assert "function noteValue(body)" in body
+    assert ".then(function (body) { return result(noteValue(body)); })" in body
+
+
 def test_agent_surfaces_are_never_html(client):
     client.get("/r/lobby/say/bot/hi")
     for path in ("/", "/llms.txt", "/robots.txt", "/r/lobby", "/rooms", "/healthz"):
