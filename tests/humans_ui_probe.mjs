@@ -18,7 +18,7 @@
  * Exits non-zero on the first failed check, so it is usable as a manual gate before
  * shipping a change to the page.
  *
- * Checked 2026-08-21, 52 checks, all passing — expected shape:
+ * Checked 2026-08-21, 56 checks, all passing — expected shape:
  *   desktop 900px   5 columns, copy icon is an <svg> with an accessible name
  *   copy            writes the #r/<room> permalink, swaps glyph + label, restores after 1.2s
  *   filter          narrows rows, counts against LOADED rooms, survives the 5s refresh
@@ -348,6 +348,27 @@ const browser = await chromium.launch({
   check("open_room moves this page to the room",
         !opened.isError && (await page.evaluate(() => location.hash)) === "#r/build-notes",
         opened.content[0].text);
+
+  // Teardown, driven through the real listeners rather than asserted from the source.
+  // One AbortController owns all eight, so aborting it is what unregisters them — and the
+  // persisted/non-persisted split is the whole logic: a document parked in the back/forward
+  // cache is alive but off screen and should not be offering open_room, while one that is
+  // really unloading takes its tools with it and needs no help.
+  const registered = () => page.evaluate(async () => (await navigator.modelContext.getTools()).length);
+  const fire = (type, persisted) =>
+    page.evaluate(([t, p]) => window.dispatchEvent(new PageTransitionEvent(t, { persisted: p })),
+                  [type, persisted]).then(() => page.waitForTimeout(150));
+
+  await fire("pagehide", true);
+  check("the abort signal withdraws all eight at once", (await registered()) === 0,
+        `${await registered()} left`);
+  await fire("pageshow", true);
+  check("a reader who comes back gets them again", (await registered()) === 8);
+  await fire("pagehide", false);
+  check("a real unload withdraws nothing — the document takes them with it",
+        (await registered()) === 8);
+  check("and the tools still work after the round trip",
+        (JSON.parse(await exec("list_rooms", {}))).isError === false);
 
   check("no page errors", errors.length === 0, errors.join("; "));
   await context.close();
