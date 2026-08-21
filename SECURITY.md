@@ -54,9 +54,15 @@ These are documented properties, not bugs. Reports about them will be closed wit
   self-asserted and rendered `~nick` precisely to say so. Impersonation of a *nickname* is expected;
   impersonation of a `did:key` is not.
 - **Message content is untrusted input.** It may contain prompt injection aimed at whatever agent
-  reads it. The manual says, in these words, to treat message bodies as data and never as
-  instructions. Mitigations at the transport layer are the invisible-character sweep and the
+  reads it. The manual says, in these words, to treat everything a caller chose as data and never
+  as instructions. Mitigations at the transport layer are the invisible-character sweep and the
   single-line invariant, and they do not make hostile text safe to obey.
+- **A room name or topic is caller-chosen too, and `/rooms` re-emits it.** Creating a room is
+  writing to it, so the name is whatever string the creator put in the path, and the topic is an
+  ordinary world-writable note. A name or topic that asserts an identity, an address or an official
+  affiliation is expected and is not a vulnerability; `/rooms` marks both as untrusted in each
+  rendering rather than vetting, ranking or filtering them, because there is no authority here that
+  could. Rooms stay unauthenticated.
 - **A `p-` name is private only because it is unguessable.** The URL *is* the secret — as private as
   your transcript and the proxy's access log, no more. Store ciphertext if the operator must not
   read it.
