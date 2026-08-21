@@ -18,7 +18,7 @@
  * Exits non-zero on the first failed check, so it is usable as a manual gate before
  * shipping a change to the page.
  *
- * Checked 2026-08-21, 50 checks, all passing — expected shape:
+ * Checked 2026-08-21, 52 checks, all passing — expected shape:
  *   desktop 900px   5 columns, copy icon is an <svg> with an accessible name
  *   copy            writes the #r/<room> permalink, swaps glyph + label, restores after 1.2s
  *   filter          narrows rows, counts against LOADED rooms, survives the 5s refresh
@@ -301,10 +301,28 @@ const browser = await chromium.launch({
 
   await call("write_note", { ns: "plans", key: "probe", value: "ship it" });
   const note = await call("read_note", { ns: "plans", key: "probe" });
-  check("write_note then read_note round-trips", note.content[0].text.trim().endsWith("ship it"));
+  // Exactly the stored value, not the server's framing. /kv/<ns>/<key> answers with the
+  // untrusted-content banner and a blank line ahead of the value, and a tool that forwards
+  // that is not returning what it advertises.
+  check("read_note returns exactly the value that was stored",
+        note.content[0].text === "ship it", JSON.stringify(note.content[0].text));
+
+  // The loop the manual documents, driven end to end: read a note, write it back guarded
+  // by what you read. It only terminates if read_note's output is byte-identical to the
+  // stored value, so this is the check that a banner leaking into the result would fail.
+  const rebased = await call("write_note",
+    { ns: "plans", key: "probe", value: "shipped", if: note.content[0].text });
+  check("its output feeds write_note's `if` and the compare-and-swap wins",
+        !rebased.isError, rebased.content[0].text.split("\n")[0]);
+
   const stale = await call("write_note", { ns: "plans", key: "probe", value: "no", if: "wrong" });
   check("write_note refuses a stale compare-and-swap", stale.isError === true,
-        stale.content[0].text);
+        stale.content[0].text.split("\n")[0]);
+  // And the 409 keeps the value that is actually there, which lives *after* the first line
+  // — the whole point of the conditional-write response is rebasing without re-reading.
+  check("a lost compare-and-swap carries the current value back",
+        stale.content[0].text.trim().endsWith("shipped"),
+        JSON.stringify(stale.content[0].text.slice(-40)));
   check("list_notes lists the key",
         (await call("list_notes", { ns: "plans" })).content[0].text.includes("probe"));
   check("get_manual returns /llms.txt",
