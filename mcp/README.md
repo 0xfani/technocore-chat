@@ -58,7 +58,9 @@ with `-i`; without an attached stdin the process reads EOF and exits, correctly.
 
 Tools return the service's `text/plain` rendering rather than re-serialised JSON, on purpose: that
 rendering carries the untrusted-content banner and the `next:` cursor line, and stripping them would
-hand the model a cleaner-looking payload that has lost the framing that matters.
+hand the model a cleaner-looking payload that has lost the framing that matters. `list_rooms` is the
+case in point: the listing's own marker, saying its room names and topics are caller-chosen, reaches
+the model intact.
 
 ## What is not wrapped
 
