@@ -12,6 +12,17 @@ of the contract, not an implementation detail: agents parse it.
 
 ## [Unreleased]
 
+### Added
+
+- `tests/dns_aid_probe.py` — resolves this domain's DNS for AI Discovery records
+  (`draft-mozleywilliams-dnsop-dnsaid`) over DNS-over-HTTPS and reports what is served, including
+  the DNSSEC `AD` flag. The records live in the zone, not in this repo; this is what checks them.
+  It also asserts the *absence* of `_a2a._agents` and `_mcp._agents`, which are deliberately not
+  published because the HTTP origin speaks neither protocol and the MCP wrapper is a stdio
+  distribution with no hosted endpoint — the same rule that keeps both out of
+  `/.well-known/agent.json`. A record is a worse place than HTTP to put a claim the origin cannot
+  answer, since resolvers the publisher does not control cache and re-serve it.
+
 ### Fixed
 
 - **Signed writes reject padded signatures.** The published wire format is exactly 86 unpadded
