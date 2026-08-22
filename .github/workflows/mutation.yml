@@ -1,11 +1,9 @@
 name: Mutation
 
-# Weekly, and on demand — never on a pull request. A scoped pass is tens of minutes, and
-# what it produces is a reading rather than a verdict: a surviving mutant is a question
-# for a human ("would anyone notice if this were wrong, and should they?"), not a defect
-# to block a merge on. Blocking on it would only teach people to widen the scope file.
-#
-# Sunday 04:20 UTC: off the weekday peak, and a fixed minute so the run is easy to find.
+# Weekly and on demand, never on a pull request. A scoped pass is tens of minutes and
+# produces a reading, not a verdict: a surviving mutant is a question ("would anyone
+# notice if this were wrong, and should they?"). Blocking merges on it would only teach
+# people to narrow the scope file.
 on:
   workflow_dispatch:
   schedule:
@@ -13,16 +11,15 @@ on:
 
 concurrency:
   group: ${{ github.workflow }}
-  # No cancel-in-progress: a run that is 40 minutes in has results worth finishing, and
-  # nothing downstream is waiting on it.
+  # A run 40 minutes in has results worth finishing, and nothing waits on it.
   cancel-in-progress: false
 
 jobs:
   mutate:
     name: "scoped mutants"
     runs-on: ubuntu-latest
-    # Measured at ~1s per mutant against the scoped test selection, and the scope is under
-    # a thousand. Generous, because the alternative to a slow run is no run.
+    # ~970 mutants at roughly a second each, measured. Generous: the alternative to a slow
+    # run is no run.
     timeout-minutes: 90
     permissions:
       contents: read
@@ -36,22 +33,20 @@ jobs:
           enable-cache: true
       - run: uv sync --frozen --group mutation
 
-      # mutmut copies the project into mutants/ and runs the suite there once per mutant,
-      # so the suite has to pass in that copy before any of this means anything. Failing
-      # here is a missing entry in `also_copy`, not a mutation finding.
+      # mutmut runs the suite in a copy of the project, so it has to pass there first.
+      # Failing here is a missing entry in `also_copy`, not a mutation finding.
       - name: Baseline
         run: uv run python -m pytest tests -q
 
-      # `xargs` rather than a literal argument list: the scope lives in one Python file
-      # with the reasoning for each entry beside it, and a copy of it here would drift.
+      # `xargs` rather than a literal list: the scope lives in one file with the reasoning
+      # beside each entry, and a copy here would drift.
       - name: Run the scoped mutants
         run: |
           uv run python tests/mutation_scope.py --patterns \
             | xargs uv run mutmut run --max-children 4
 
-      # Always: a run that died halfway still knows what it killed, and the report is the
-      # only artifact anyone reads. It exits non-zero when the *harness* broke — mutants
-      # generated and never judged — which is the one thing here worth a red run.
+      # Always: a run that died halfway still knows what it killed. Exits non-zero only
+      # when the harness broke — mutants generated and never judged.
       - name: Report
         if: always()
         run: |

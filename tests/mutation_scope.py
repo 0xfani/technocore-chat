@@ -3,33 +3,27 @@
 Run: uv run --group mutation python tests/mutation_scope.py --patterns
      uv run --group mutation python tests/mutation_scope.py --report
 
-Mutation testing asks the only question coverage cannot: not "did a test execute this
-line" but "would a test have *noticed* if this line were wrong". A green suite over a
-mutated `>` that should be `>=` is a suite that measured nothing about that boundary.
+Mutation testing asks what coverage cannot: not "did a test execute this line" but "would
+a test have *noticed* if this line were wrong".
 
-It is scoped, and deliberately not run on every pull request. `src/` carries ~3600
-mutants; a full pass is tens of minutes and most of it is noise — a mutated log string or
-a reordered dict literal is not a defect anyone will ever ship. What is worth the machine
-time is the code where being subtly wrong is expensive and being wrong is silent:
+It is scoped, and not run on pull requests. `src/` carries ~3600 mutants; a full pass is
+tens of minutes and most of it is noise — a mutated log string is not a defect anyone will
+ship. What earns the machine time is code where being wrong is silent:
 
-  ttl            An off-by-one in an idle threshold does not fail; it quietly keeps data
-                 a week too long or deletes it a day too early, and either way nobody
-                 finds out from a stack trace. The whole retention promise is four
-                 comparisons.
-  authorization  Every gate here fails *closed* by design, and a mutant that turns one
-                 into fail-open is exactly the change no test on the happy path can see.
-                 A signed lane that verifies nothing still returns 200.
-  caps           These are the only thing standing between an anonymous, world-writable
-                 service and its disk. A cap compared with the wrong operator holds right
-                 up to the moment it matters.
-  guidance       The refusal bodies are the service's real documentation for an agent that
-                 already got something wrong — /llms.txt is what it reads *before*. A test
-                 that asserts only the status code lets the correction rot.
+  ttl            An off-by-one in an idle threshold does not fail. It keeps data a week too
+                 long or deletes it a day too early, and nobody finds out from a stack
+                 trace. The whole retention promise is four comparisons.
+  authorization  Every gate fails closed by design; a mutant that flips one to fail-open is
+                 invisible on the happy path. A signed lane that verifies nothing still
+                 returns 200.
+  caps           The only thing between an anonymous, world-writable service and its disk.
+                 A cap with the wrong operator holds right up to the moment it matters.
+  guidance       The refusal bodies are the real documentation for an agent that already
+                 got something wrong. A test asserting only the status code lets them rot.
 
-The patterns are mutmut's mutant names: `<module>.x_<function>__mutmut_<n>`, where a
-private `_reap` becomes `x__reap`. Grouping by theme rather than by module is the point —
-`caps` reaches into three files, and a reader asking "is the rate limiter covered" should
-not have to know which one it lives in.
+Patterns are mutmut mutant names: `<module>.x_<function>__mutmut_<n>`, where a private
+`_reap` becomes `x__reap`. Grouped by theme rather than module — `caps` spans three files,
+and "is the rate limiter covered" should not require knowing which one.
 """
 
 from __future__ import annotations
@@ -84,9 +78,8 @@ SCOPE: dict[str, tuple[str, ...]] = {
     ),
 }
 
-# Statuses that mean the run did not do its job, as opposed to finding something. A
-# survivor is a question for a human; these are a broken harness, and the difference has
-# to be visible in the exit code or the report is decoration.
+# The run failing to do its job, as opposed to finding something. A survivor is a question
+# for a human; these are a broken harness, and only the second is worth a red run.
 BROKEN = ("suspicious", "segfault", "no_tests", "check_was_interrupted_by_user")
 
 STATS = Path("mutants/mutmut-cicd-stats.json")
@@ -99,9 +92,8 @@ def patterns() -> list[str]:
 def _survivors() -> list[str] | None:
     """The scoped mutants no test noticed, or None if `mutmut results` could not be read.
 
-    None rather than an empty list, because the two mean opposite things and this report is
-    the only thing anyone reads: "nothing survived" and "the tool that lists the survivors
-    did not run" must never render the same.
+    None rather than an empty list: "nothing survived" and "the tool that lists survivors
+    did not run" mean opposite things and must never render the same.
     """
     result = subprocess.run(
         [sys.executable, "-m", "mutmut", "results"],
@@ -126,26 +118,23 @@ def report() -> int:
     broken = {name: stats[name] for name in BROKEN if stats.get(name)}
     survivors = _survivors()
 
-    # The survivor section decides one more way the run can be broken, so it is rendered
-    # first and spliced in below whatever `broken` ends up saying.
+    # Rendered first because it can add to `broken`, then spliced in below it.
     if not stats["survived"]:
         body = ["Nothing survived: every mutant in scope was caught by a test.", ""]
     elif survivors is None:
         broken["survivors_unreadable"] = stats["survived"]
         body = [
             f"{stats['survived']} mutant(s) survived and `mutmut results` could not be "
-            "read, so this report cannot say which. Re-run it from the same working "
-            "directory as the run.",
+            "read, so this cannot say which. Re-run it from the run's working directory.",
             "",
         ]
     else:
         body = [
             "### Survivors",
             "",
-            "Each one is a change to this service that the suite would not have noticed. "
-            "Some are genuinely untestable — an equivalent mutant, a boundary no caller "
-            "can reach — and the rest are a missing test. `mutmut show <name>` prints the "
-            "diff behind one.",
+            "Each is a change the suite would not have noticed. Some are untestable — an "
+            "equivalent mutant, a boundary no caller can reach — and the rest are a "
+            "missing test. `mutmut show <name>` prints the diff.",
             "",
             "```",
             *survivors,
@@ -163,17 +152,16 @@ def report() -> int:
     ]
     if stats.get("timeout"):
         out += [
-            f"{stats['timeout']} mutant(s) timed out. A timeout is usually a mutated loop "
-            "bound rather than a harness fault, and counts as killed nowhere — worth a "
-            "look if the number moves.",
+            f"{stats['timeout']} mutant(s) timed out — usually a mutated loop bound, and "
+            "counted as killed nowhere. Worth a look if the number moves.",
             "",
         ]
     if broken:
         out += [
             "### The run itself is broken",
             "",
-            "Not findings. Mutants were generated and never properly judged, so the "
-            "numbers above understate what is uncovered:",
+            "Not findings: mutants generated and never judged, so the numbers above "
+            "understate what is uncovered.",
             "",
             *(f"- `{name}`: {count}" for name, count in broken.items()),
             "",

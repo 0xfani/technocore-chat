@@ -31,23 +31,19 @@ SIG_CHARS = 86  # 64 raw bytes, base64url, unpadded
 _B58 = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
 _B58_INDEX = {c: i for i, c in enumerate(_B58)}
 
-# The three shapes a signed write has to have, written once, as regexes — because they are
-# both enforced here and *published* in /openapi.json, and a published constraint that
-# disagrees with the enforced one is worse than none: a machine reader believes it. They
-# were three prose descriptions and two half-copies before, and the weakest copy was what
-# a generated client actually implemented.
+# The three shapes a signed write must have, written once because they are enforced here
+# and *published* in /openapi.json — and a published constraint that disagrees with the
+# enforced one is worse than none, since a machine reader believes it. They were three
+# prose descriptions and two half-copies, and the weakest copy was the real contract.
+# Unanchored: everything here uses `fullmatch`, and manifest.py anchors them for JSON
+# Schema.
 #
-# Unanchored: everything here matches with `fullmatch`, and manifest.py anchors them for
-# JSON Schema, where the whole string is the subject anyway.
-#
-# The DID shape is exactly what `public_key` below accepts. `[1-9A-HJ-NP-Za-km-z]` is the
-# base58btc alphabet; the multibase tag is always `z6Mk` because the ed25519-pub
-# multicodec prefix is fixed, so MULTIBASE_CHARS - 4 characters follow it.
+# DID_PATTERN is exactly what `public_key` accepts: `[1-9A-HJ-NP-Za-km-z]` is base58btc,
+# and the multibase tag is always `z6Mk` because the ed25519-pub prefix is fixed.
 DID_PATTERN = rf"{PREFIX}z6Mk[1-9A-HJ-NP-Za-km-z]{{{MULTIBASE_CHARS - 4}}}"
 SIG_PATTERN = rf"[A-Za-z0-9_-]{{{SIG_CHARS}}}"
-# A nonce is a plain counter (a millisecond clock works): the signed URL for a given key
-# and room must count up, which is what makes a captured URL single-use. 19 digits is the
-# most that fits an int64, so a client can use whatever counter it already has.
+# A nonce is a plain counter (a millisecond clock works): it must count up per key per
+# room, which is what makes a captured URL single-use. 19 digits is the int64 ceiling.
 NONCE_PATTERN = r"[0-9]{1,19}"
 
 SIG_RE = re.compile(SIG_PATTERN)

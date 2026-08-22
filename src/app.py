@@ -862,12 +862,10 @@ def rooms(request: Request) -> Response:
 # attack, so waiters are capped twice — per IP, and globally — and exceeding either
 # degrades to an immediate empty reply rather than an error. A caller that cannot get a
 # slot is exactly as well off as before long-polling existed.
-# Ceiling on ?wait=. Configurable because the useful value is a property of the deployment
-# — whatever proxy sits in front has its own read timeout, and a long poll that outlives it
-# is answered by the proxy, not by this service. Read from the environment rather than
-# hardcoded because the number is *published*: /openapi.json states it as the parameter's
-# maximum and /.well-known/agent.json states it twice more, and a tuned instance whose
-# documents still said 10 would be the exact drift manifest.py exists to prevent.
+# Ceiling on ?wait=, tunable because the useful value is whatever the proxy in front will
+# hold. Passed into both manifest builders rather than hardcoded there: three documents
+# publish this number, and a tuned instance still saying 10 is the drift manifest.py
+# exists to prevent.
 MAX_WAIT = max(0.0, float(os.environ.get("CHAT_MAX_WAIT", "10")))
 WAIT_POLL = 0.5  # a new message surfaces within this, so ?wait=0.5 is the useful floor
 MAX_WAITERS_TOTAL = 64
@@ -1650,21 +1648,19 @@ async def on_not_found(request: Request, exc: Exception) -> Response:
     return text(NOT_FOUND, 404)
 
 
-# The order an `Allow` header is rendered in. RFC 9110 gives the list no significance, but
-# a header that reshuffles between responses is one more thing a caller has to normalise
-# before it can compare two of them — and one more way a test can flake.
+# RFC 9110 gives Allow's order no meaning, but a list that reshuffles between responses is
+# one more thing a caller has to normalise — and one more way a test can flake.
 _METHOD_ORDER = ("GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS")
 
 
 def allowed_methods(request: Request) -> list[str]:
     """Every method the *path* accepts, not just the first route that claimed it.
 
-    Two routes share `/r/<room>`: the GET reader and the POST writer, and the same for
-    `/kv/<ns>/<key>`. Starlette hands its 405 to whichever one partially matched first, so
-    the `Allow` it builds names that route's methods alone — `GET, HEAD` on a path that
-    plainly also takes POST. A caller that believes the header would then rule out the one
-    verb that would have worked. The union over every route that matches the path is the
-    only answer that is true of the resource rather than of one registration of it.
+    Two routes share `/r/<room>` (GET reader, POST writer), and two share `/kv/<ns>/<key>`.
+    Starlette builds `Allow` from whichever partially matched first, so it would say
+    `GET, HEAD` on a path that plainly also takes POST — ruling out the one verb that
+    would have worked. Only the union is true of the resource rather than of one
+    registration of it.
     """
     methods: set[str] = set()
     for route in request.app.routes:
@@ -1679,17 +1675,13 @@ def allowed_methods(request: Request) -> list[str]:
 async def on_method_not_allowed(request: Request, exc: Exception) -> Response:
     """405 with the lane that would have worked.
 
-    The whole premise of the service is that writes are reachable by GET, so a caller that
-    picked PUT/DELETE/PATCH has almost certainly guessed at a REST shape rather than read
-    the manual — and the right correction is a URL, not a verb.
+    Writes here are reachable by GET, so a caller that picked PUT/DELETE/PATCH guessed at a
+    REST shape rather than reading the manual: the correction is a URL, not a verb.
 
-    `Allow` is required on a 405 (RFC 9110 §15.5.6) and was missing, which cost more than
-    pedantry: it is the one machine-readable part of this answer, and a client that probes
-    for a verb by sending one now learns the whole set from the response instead of one
-    round trip per method. The header is also repeated in the body, for the reason the
-    rate-limit response repeats Retry-After there — agent harnesses surface the body and
-    drop the headers, so a correction that lives only in a header does not reach the
-    reader who needs it.
+    `Allow` is required (RFC 9110 §15.5.6) and was missing — it is the one machine-readable
+    part of this answer, and it saves a client one round trip per verb it would otherwise
+    probe. Repeated in the body for the reason the rate-limit response repeats Retry-After:
+    agent harnesses show the body and drop the headers.
     """
     allow = allowed_methods(request)
     return text(

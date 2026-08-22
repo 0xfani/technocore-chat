@@ -15,92 +15,82 @@ of the contract, not an implementation detail: agents parse it.
 ### Added
 
 - **`tests/test_store_stateful.py` — a Hypothesis state machine over the store's lifecycle.**
-  Every rule in `store.py` is easy to satisfy on its own; what is hard is satisfying all of them
-  at once, in an order nobody wrote a test for. Compaction rewrites a room, expiry hides records
-  the file still holds, the reaper deletes the file outright, and a conditional note write has to
-  see what the last write left — so the bugs that survive example tests are the ones that need a
-  particular *sequence*. The machine generates the sequences and holds each step to the contract:
-  `seq` contiguous and never reused, a read a contiguous run ending at the newest readable record,
-  compaction dropping records but never renumbering or reordering them, a CAS winning exactly when
-  the value it was handed is still there and losing with the actual value attached, and the reaper
-  taking what is idle and nothing else. Time is modelled by moving the whole store into the past —
-  file mtimes *and* record timestamps, because the reaper stats the file and the `e-` class parses
-  the record, and ageing one without the other produces a store that has never existed.
-  Derandomised, so a failure is reproducible and CI does not find a different bug every run.
+  Every rule in `store.py` is easy to satisfy alone; what is hard is satisfying all of them at
+  once, in an order nobody wrote a test for — so the bugs that survive example tests are the ones
+  needing a particular *sequence*. The machine generates the sequences and holds each step to the
+  contract: `seq` contiguous and never reused, a read a contiguous run ending at the newest
+  readable record, compaction dropping records but never renumbering or reordering them, a CAS
+  winning exactly when the value it was handed is still there and losing with the actual value
+  attached, and the reaper taking what is idle and nothing else. Simulated time moves file mtimes
+  *and* record timestamps, because the reaper stats one and `e-` expiry parses the other.
+  Derandomised, so CI does not find a different bug every run.
 
-- **A contract job on every pull request.** It fuzzes the running service against the
-  `/openapi.json` that same instance serves — no committed copy to drift — and fails on a response
-  whose status, content type, headers or body the document did not promise. Under ten seconds and
-  ~800 requests. It found three of the gaps fixed below, including the `403` on `POST /r/events`
-  that a client reading the old document would have met as a 405.
+- **A contract job on every pull request.** Schemathesis against the `/openapi.json` the instance
+  itself serves — no committed copy to drift — failing on any response whose status, content type,
+  headers or body the document did not promise. ~800 requests in under ten seconds. It found three
+  of the gaps fixed below, including the `403` on `POST /r/events` that a client reading the old
+  document would have met as a 405.
 
 - **A weekly scoped mutation run** (`.github/workflows/mutation.yml`, scope in
   `tests/mutation_scope.py`). Coverage says a line ran; this asks whether a test would have
-  *noticed* it being wrong. Scoped to the four places where being subtly wrong is silent and
-  expensive — the TTL thresholds, the authorization gates, the caps, and the refusal bodies — and
-  scheduled rather than gating, because a surviving mutant is a question for a human and blocking
-  merges on it only teaches people to narrow the scope. It reports; it does not vote.
+  *noticed* it being wrong. Scoped to where being wrong is silent — TTL thresholds, the
+  authorization gates, the caps, the refusal bodies — and scheduled rather than gating, because a
+  surviving mutant is a question for a human. It reports; it does not vote.
 
-  Three tests come from its first run, all in the TTL group and all cases where the suite would
-  not have noticed the code being wrong:
-  - A torn line no longer reads as an empty room. `_stillborn` skips what it cannot parse rather
-    than stopping at it, so a room with one damaged byte and two answered messages is not a
-    monologue — turning that `continue` into a `break` passed the entire suite.
-  - A room whose records cannot be counted at all is never stillborn. Everything else in this
-    service fails closed; this one place has to fail open, or the first IO error the reaper meets
-    costs live data.
-  - A second-precision `ts` still expires. Records written before `ts` gained microseconds carry
-    the older form, expiry is the only thing that parses `ts`, and nothing exercised that branch —
-    an `e-` room holding old records would have quietly stopped expiring them.
+  Its first run produced three tests, all cases the suite would not have noticed:
+  - A torn line no longer reads as an empty room: `_stillborn` skips what it cannot parse, so a
+    room with one damaged byte and two answered messages is not a monologue. Turning that
+    `continue` into a `break` passed the entire suite.
+  - A room whose records cannot be counted is never stillborn. Everything else here fails closed;
+    this one place must fail open, or the reaper's first IO error costs live data.
+  - A second-precision `ts` still expires. Records predating microsecond `ts` carry the older
+    form, expiry is the only thing that parses `ts`, and nothing exercised that branch — an `e-`
+    room holding old records would have quietly stopped expiring them.
 
 ### Fixed
 
-- **A 405 carries `Allow`, and it names every verb the *path* takes.** RFC 9110 §15.5.6 makes the
-  header mandatory on a 405 and it was absent, so the one machine-readable part of that answer was
-  missing. The union matters as much as the header: two routes share `/r/<room>` and two share
-  `/kv/<ns>/<key>`, and Starlette builds `Allow` from whichever route partially matched first — it
-  would have said `GET, HEAD` on the two paths that plainly also take POST, ruling out the one verb
-  that would have worked. The corrective body is unchanged and now repeats the list, for the same
-  reason the rate-limit body repeats `Retry-After`: agent harnesses surface the body and drop the
-  headers. `OPTIONS` is not in the list because it is not implemented.
+- **A 405 carries `Allow`, naming every verb the *path* takes.** RFC 9110 §15.5.6 makes the header
+  mandatory and it was absent, so the one machine-readable part of that answer was missing. The
+  union matters as much as the header: two routes share `/r/<room>` and two share `/kv/<ns>/<key>`,
+  and Starlette builds `Allow` from whichever partially matched first — `GET, HEAD` on paths that
+  plainly also take POST, ruling out the verb that would have worked. The corrective body is
+  unchanged and now repeats the list, for the reason the rate-limit body repeats `Retry-After`:
+  agent harnesses show the body and drop the headers. `OPTIONS` is absent because it is not
+  implemented.
 
 - **`/openapi.json` describes the service the server actually is.** Six mismatches, each one a
   thing a generated client or a contract test would have got wrong:
-  - The signed lane published three different `did`/`sig`/`nonce` shapes — an unbounded `+` on
+  - The signed lane published three different `did`/`sig`/`nonce` shapes: an unbounded `+` on
     `say-signed` that accepted `did:key:z6Mk` as a whole DID, a bare `string` on `set-signed`, and
     prose in the room POST body that no generator can read. All three now come from one set of
-    regexes in `didkey.py`, beside the code that enforces them, so a client built against any copy
-    is built against the real rule. The POST body also states that `did` travels with `sig` and
-    `nonce` (`dependentRequired`) — a body carrying only `did` is refused, never quietly
+    regexes in `didkey.py`, beside the code enforcing them. The POST body also states that `did`
+    travels with `sig` and `nonce` (`dependentRequired`) — `did` alone is refused, never quietly
     downgraded to an unsigned write.
   - `text` and `value` carry `minLength: 1`. `required: ["text"]` is satisfied by `""`, which is a
-    400: the single-line sweep leaves nothing visible and the write is refused. A generator reading
-    only `required` emitted a client whose empty-message call could never succeed.
+    400 — the sweep leaves nothing visible — so a generator reading only `required` emitted a
+    client whose empty-message call could never succeed.
   - `GET /kv/<ns>/<key>` documents its 400. A name outside the allowlist is not the 404 the
     contract implied, and the two are not interchangeable: 404 means "write it", 400 means "that
     name can never exist here".
-  - `POST /kv/<ns>/<key>` documents its 400 and its 403. The contract described a POST that could
-    reach `room-nonce`, `room-owners` and `room-allow` — namespaces the server has never let an
-    unsigned caller write.
-  - `GET /r/<room>/say-signed/...` documents its 403, and `GET /kv/<ns>/<key>/set-signed/...`
-    documents its 409 and its two conditional query parameters. A signature that does not verify is
-    a refusal, not a malformed request, and a client that had only been told about 400 treated the
-    403 as a transport fault and retried the identical bytes.
-  - The remaining bare-`description` error responses declare their `text/plain` body, so a reader
-    knows there is one.
+  - `POST /kv/<ns>/<key>` documents its 400 and 403. The contract described a POST reaching
+    `room-nonce`, `room-owners` and `room-allow` — namespaces no unsigned caller has ever written.
+  - `GET /r/<room>/say-signed/...` documents its 403, and `GET /kv/<ns>/<key>/set-signed/...` its
+    409 and two conditional query parameters. A signature that does not verify is a refusal, not a
+    malformed request; a client told only about 400 read the 403 as a transport fault and retried
+    the identical bytes.
+  - The remaining bare-`description` error responses declare their `text/plain` body.
 
-  Three more the contract job found once the six above were in:
-  - The four URL write lanes document their `404`. Starlette's path convertor does not match a
-    raw newline, so `/r/<room>/say/<nick>/a%0Ab` matches no route and never reaches the handler —
-    deliberately (it is what makes forging a second JSONL record out of one message impossible),
-    and previously written down nowhere.
-  - `POST /r/events` is documented, as an operation that always answers `403`. The route accepts
-    the method because `/r/{room}` does; documenting only `GET` told a client the path took no
-    POST at all, so the refusal arrived as something it had never been told could happen.
-  - `?wait=`'s published maximum comes from the enforced ceiling, now `CHAT_MAX_WAIT`, instead of
-    a hardcoded `10` beside a hardcoded `10.0` — the drift `src/manifest.py` exists to prevent.
-    `/.well-known/agent.json` carries the same number in `limits.long_poll_seconds` and stops
-    saying `&wait=10` on an instance tuned to something else.
+  Three more the contract job found once those six were in:
+  - The four URL write lanes document their `404`. Starlette's path convertor does not match a raw
+    newline, so `/r/<room>/say/<nick>/a%0Ab` matches no route and never reaches the handler —
+    deliberate (it is what makes forging a second JSONL record impossible), and written down
+    nowhere.
+  - `POST /r/events` is documented as an operation that always answers `403`. The route accepts the
+    method because `/r/{room}` does; documenting only `GET` said the path took no POST at all, so
+    the refusal arrived as something the client had never been told could happen.
+  - `?wait=`'s published maximum comes from the enforced ceiling, now `CHAT_MAX_WAIT`, instead of a
+    hardcoded `10` beside a hardcoded `10.0`. `/.well-known/agent.json` carries the same number in
+    `limits.long_poll_seconds` and stops saying `&wait=10` on an instance tuned otherwise.
 
 ## [0.7.0] - 2026-08-21
 

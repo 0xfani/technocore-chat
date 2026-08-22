@@ -80,10 +80,9 @@ jobs:
           curl -fsS localhost:8080/.well-known/agent.json | grep -q '"content_is_untrusted"'
           docker rm -f technocore-chat-ci
 
-  # A separate job because it needs the service running and nothing else here does, and
-  # because a red contract check should point at the contract rather than at "the tests".
-  # It runs against the instance's own /openapi.json, so what is checked is always the
-  # document this build would serve, not a copy of it committed beside the code.
+  # Separate because it needs the service running, and because a red contract check should
+  # point at the contract rather than at "the tests". It fetches the instance's own
+  # /openapi.json, so there is no committed copy to drift.
   contract:
     name: "openapi contract"
     runs-on: ubuntu-latest
@@ -101,14 +100,11 @@ jobs:
           enable-cache: true
       - run: uv sync --frozen --group contract
 
-      # Tuned so the fuzzer spends its budget on handlers rather than on the parts of the
-      # service that exist to stop it:
-      #   CHAT_MAX_WAIT       the long-poll ceiling, published as the `wait` maximum — at
-      #                       the default 10 a few generated long polls cost more wall
-      #                       clock than the whole run.
-      #   CHAT_RATE_*         the limiter would otherwise answer most of the run with 429,
-      #                       which conforms to the schema and checks nothing.
-      # Everything else is the shipped configuration.
+      # Tuned so the fuzzer spends its budget on handlers rather than on the parts that
+      # exist to stop it. CHAT_MAX_WAIT is published as the `wait` maximum, and at the
+      # default 10 a few generated long polls cost more than the whole run; without the
+      # rate bumps the limiter answers most of it with a 429 that conforms and checks
+      # nothing. Everything else is the shipped configuration.
       - name: Start the service
         run: |
           CHAT_ROOT="$(mktemp -d)" \
@@ -120,30 +116,25 @@ jobs:
             sleep 1
           done
 
-      # Deterministic by construction: --generation-deterministic fixes the generator
-      # (it supersedes --seed, which the CLI then ignores) and the pinned schemathesis in
-      # the `contract` group fixes the generator itself, so a failure here is a change in
-      # this service. Under ten seconds and ~800 requests at these settings.
+      # Deterministic: --generation-deterministic fixes the generation (superseding
+      # --seed, which the CLI then ignores) and the pinned schemathesis fixes the generator,
+      # so a failure is a change in this service. ~800 requests in under ten seconds.
       #
-      # The checks are named rather than `all`, because two of the rest encode assumptions
-      # this service deliberately breaks:
-      #   negative_data_rejection expects schema-invalid input to be refused, and `?wait=x`
-      #     or `?limit=x` is *ignored* here (`_cursor` falls back to the default) — being
-      #     lenient about a query parameter an agent guessed wrong is the point.
-      #   positive_data_acceptance expects schema-valid input to succeed, and a valid write
-      #     to a mailbox, an owned room or a reserved namespace is refused by design.
-      # What is left is the part that must hold: no 500s, and every response conforming to
-      # the status, content type, headers and schema the document promised — plus the two
-      # 405 checks, since Allow is the one machine-readable part of a refused method.
+      # Checks are named rather than `all`, because two of the rest assume things this
+      # service breaks on purpose: negative_data_rejection expects schema-invalid input to
+      # be refused, but a mistyped `?wait=` or `?limit=` is ignored (`_cursor` falls back);
+      # positive_data_acceptance expects valid input to succeed, but a valid write to a
+      # mailbox or a reserved namespace is refused. What remains is what must hold — no
+      # 500s, every response matching the status, content type, headers and schema
+      # promised, and the two 405 checks, since Allow is the machine-readable half of a
+      # refused method.
       #
-      # --warnings lists what to *enable*, and three are left out on purpose. `missing_auth`
-      # fires on an operation that only ever answers 403 and suggests credentials, which
-      # this service has none of — POST /r/events is refused by design, not unauthenticated.
-      # `validation_mismatch` fires on the signed lanes, where a generated 86-character
-      # string is never a valid Ed25519 signature and never will be. `missing_test_data`
-      # fires because a generated note name has never been written and 404 is the correct
-      # answer — a note is created by writing it, so there is no fixture to seed. None of
-      # the three is actionable, and a warning that is always present is one nobody reads.
+      # --warnings lists what to *enable*. Three are left out because they can never clear:
+      # missing_auth (POST /r/events only ever 403s, and there are no credentials to
+      # suggest), validation_mismatch (a generated 86-character string is never a valid
+      # Ed25519 signature), missing_test_data (a generated note name has never been
+      # written, and 404 is the right answer). A warning that is always there is one
+      # nobody reads.
       - name: Check the running service against its own /openapi.json
         run: |
           uv run schemathesis run http://localhost:8099/openapi.json \

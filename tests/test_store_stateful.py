@@ -1,26 +1,21 @@
-"""Hypothesis state machines over the store's lifecycle.
+"""A Hypothesis state machine over the store's lifecycle.
 
 Run: uv run --group dev python -m pytest tests/test_store_stateful.py
 
-Why a state machine and not more example tests. Every rule in `store.py` is easy to state
-and easy to satisfy on its own; what is hard is satisfying all of them at once, in an order
-nobody wrote a test for. Compaction rewrites a room, expiry hides records the file still
-holds, the reaper deletes the file outright, and a conditional note write has to see the
-value the last write left — so the interesting bugs live in the *sequences*: a seq reused
-after a compaction that kept nothing, a cursor that skips a record because expiry and
-`since` disagree about which end of the file to stop at, a guard note reclaimed while the
-room it guards is still busy. Hypothesis generates those orderings; these machines say what
-must be true after every one of them.
+Every rule in `store.py` is easy to satisfy alone; what is hard is satisfying all of them
+at once, in an order nobody wrote a test for. So the interesting bugs live in the
+*sequences*: a seq reused after a compaction that kept nothing, a cursor that skips a
+record because expiry and `since` disagree about which end of the file to stop at, a guard
+note reclaimed while the room it guards is still busy.
 
-The model deliberately does not predict compaction byte-for-byte. Compaction's contract is
-"keep the newest records that fit, drop the rest, never reorder and never renumber" — so
-the machine reads back what survived and holds *that* to the contract, rather than
-re-implementing `_compact` and testing the copy.
+Two things about the model:
 
-Time is modelled by moving the whole store into the past — every file's mtime *and* every
-record's `ts`. Both, because the two lifetimes read different clocks: the reaper stats the
-file, the `e-` class parses the record. Ageing one without the other produces a store that
-has never existed.
+- It does not predict compaction byte-for-byte. The contract is "keep the newest that fit,
+  drop the rest, never reorder and never renumber", so the machine reads back what survived
+  and holds *that* to it, rather than re-implementing `_compact` and testing the copy.
+- Time moves the whole store into the past: file mtimes *and* record timestamps. The reaper
+  stats the file and `e-` expiry parses the record, so ageing one without the other
+  produces a store that has never existed.
 """
 
 from __future__ import annotations
@@ -41,35 +36,28 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 import store  # noqa: E402
 
-# Every threshold is compared against a real clock — `time.time()` at the moment the
-# reaper or the read runs — while the model counts whole seconds of simulated ageing. The
-# two differ by however long the step took, so an age that lands *on* a threshold is
-# genuinely ambiguous. Assertions are one-sided outside this band and skipped inside it:
-# a test that flakes on its own timing teaches nothing about the code.
+# Thresholds are compared against a real clock while the model counts whole seconds of
+# simulated ageing, so an age landing *on* a threshold is genuinely ambiguous. Assertions
+# are one-sided outside this band and skipped inside it.
 GUARD_SECONDS = 5
 
-# Small enough that a handful of appends rotates a room, so compaction is reached inside a
-# default-length run instead of being a case only a 10 MiB test could see. A record is
-# ~90-140 bytes, so a room rotates every three or four messages.
+# A record is ~90-140 bytes, so a room rotates every three or four messages and compaction
+# is reached inside a default-length run.
 RING_BYTES = 512
 
-# Three rooms, not one per class. Every extra name divides the same step budget, and a run
-# that touches five rooms twice each never reaches compaction; `store.py` distinguishes
-# exactly two things about a name here — whether it is ephemeral and whether it is the
-# events room — so one of each plus a plain room covers the behaviour and leaves the steps
-# to go deep. Which names are unlisted or mailboxes is app.py's business, not the store's.
+# Three rooms, not one per class: every extra name divides the same step budget, and a run
+# that touches five rooms twice each never reaches compaction. `store.py` cares about
+# exactly one thing here — whether a name is ephemeral. Mailboxes and unlisted rooms are
+# app.py's business.
 ROOMS = ("lobby", "e-fast", "d-owned")
 NICKS = ("alice", "bob")
-# `room-owners` is a *guard* namespace: its notes are exempt from the idle rule for as long
-# as the room they name is still live, which is a rule with no meaning unless a note and a
-# room of the same name are both in play. Hence the `d-owned` key.
+# `room-owners/d-owned` on purpose: guard notes are exempt from the idle rule while the
+# room they name is live, which means nothing unless both are in play.
 NOTES = (("plans", "next"), ("topic", "lobby"), ("room-owners", "d-owned"))
 
-# No character here is in INVISIBLE_CATEGORIES, so the value the model records is the value
-# the store stores — `test_the_model_and_the_sweep_agree_on_these_values` holds that line
-# rather than leaving it to a comment. Built to be non-empty and unpadded by construction
-# rather than by `.filter()`: `clean_text` trims the ends and refuses what is left empty,
-# and a filter that rejects most of what it is offered spends the budget on retries.
+# Nothing here is in INVISIBLE_CATEGORIES, so the value the model records is the value the
+# store stores (held by the two tests at the bottom). Non-empty and unpadded by
+# construction rather than by `.filter()`, which would spend the budget on retries.
 _VISIBLE = "abcdefghijklmnopqrstuvwxyz0123456789-_.,:!?éü日🙂"
 SAFE_TEXT = st.builds(
     lambda first, rest: first + rest,
@@ -95,11 +83,10 @@ def _age_world(root: Path, seconds: int) -> None:
     for path in sorted(root.rglob("*")):
         if path.is_dir():
             continue
-        # Stat first. Rewriting a room to shift its records also stamps it with the
-        # current mtime, so reading the mtime afterwards would age the file from *now*
-        # instead of from where it already was — and every advance after the first would
-        # silently reset the file's age to one step. The reaper reads mtime, so the whole
-        # idle half of this machine would have been testing nothing.
+        # Stat first: rewriting a room to shift its records restamps its mtime, so
+        # reading it afterwards would age the file from *now* and every advance after the
+        # first would reset its age to one step. The reaper reads mtime, so the whole idle
+        # half of this machine would have been testing nothing.
         stat = path.stat()
         if path.suffix == ".jsonl":
             _shift_records(path, seconds)
@@ -123,13 +110,10 @@ class StoreLifecycle(RuleBasedStateMachine):
             # A ring a few messages wide, so compaction is part of an ordinary run.
             "MAX_ROOM_BYTES": RING_BYTES,
             "COMPACT_KEEP_BYTES": RING_BYTES // 2,
-            # Every write reaps. The production throttle would make "did this step reap?"
-            # a function of wall-clock time, which is the one thing a model must not have
-            # to guess; at zero the answer is always yes and the machine can hold the
-            # reaper to its rule on every step.
+            # Every write reaps. The production throttle makes "did this step reap?" a
+            # function of wall-clock time, which is the one thing a model must not guess.
             "REAP_EVERY": 0,
-            # Snapshots are a sampled digest of the same numbers, taken on the write path.
-            # They would add a second file to age and nothing to check.
+            # A sampled digest of the same numbers: another file to age, nothing to check.
             "SNAPSHOT_EVERY": 1 << 30,
         }
         self.saved = {name: getattr(store, name) for name in tuning}
@@ -155,10 +139,9 @@ class StoreLifecycle(RuleBasedStateMachine):
 
     # ------------------------------------------------------------------ the reaper, modelled
     #
-    # Both verdict functions answer "gone", "kept", or None — None meaning an age sits
-    # close enough to a threshold that the model and the reaper's real clock could
-    # disagree, and nothing may be asserted either way. Every caller either acts on a
-    # definite verdict or leaves the state to `_resync` to read back off the disk.
+    # "gone", "kept", or None — None when an age sits close enough to a threshold that the
+    # model and the reaper's real clock could disagree. Callers either act on a definite
+    # verdict or leave the state to `_resync` to read back off the disk.
 
     def _room_verdict(self, room: str) -> str | None:
         on_disk = len(self.said[room])
@@ -187,11 +170,10 @@ class StoreLifecycle(RuleBasedStateMachine):
             return None
         if age < store.IDLE_SECONDS:
             return "kept"
-        # Past its own idle window. A guard note goes only when the room it guards does:
-        # an allow-list that expired first would hand write access back to everyone, and a
-        # replay counter that expired first would let a captured signed URL re-add a key
-        # the owner had revoked. Tied to the room rather than exempt outright, so the state
-        # stays bounded — once the room goes, its guards go with it.
+        # Past its own idle window. A guard note goes only when its room does: an
+        # allow-list that expired first hands write access back to everyone, and a replay
+        # counter that expired first lets a captured URL re-add a revoked key. Tied to the
+        # room rather than exempt outright, so the state stays bounded.
         if ns in store.ROOM_GUARD_NS and name in ROOMS:
             return "gone" if not self.said[name] else self._room_verdict(name)
         return "gone"
@@ -209,11 +191,10 @@ class StoreLifecycle(RuleBasedStateMachine):
                 self.notes.pop(key, None)
 
     def _resync(self) -> None:
-        """Adopt what is actually on disk, having first checked it against the model.
+        """Check the disk against the model, then adopt it.
 
         Anything the model could only guess at — which records compaction kept, whether an
-        age inside the guard band tipped the reaper — is read back here rather than
-        predicted, so the following steps reason about the store as it now is.
+        age inside the guard band tipped the reaper — is read back rather than predicted.
         """
         for room in ROOMS:
             records = _on_disk(self.root, room)
@@ -251,9 +232,8 @@ class StoreLifecycle(RuleBasedStateMachine):
         texts=st.lists(SAFE_TEXT, min_size=1, max_size=4),
     )
     def say(self, room: str, nick: str, texts: list[str]) -> None:
-        """A burst rather than one line, because a step budget spent one message at a time
-        never fills a ring: compaction, and the expiry that rides it, are only reachable
-        from a room with a history."""
+        """A burst rather than one line: a step budget spent one message at a time never
+        fills a ring, and compaction is only reachable from a room with a history."""
         self._reap_model()
         for text in texts:
             record = store.append(self.root, room, nick, text)
@@ -310,10 +290,9 @@ class StoreLifecycle(RuleBasedStateMachine):
 
     @rule(room=st.sampled_from(ROOMS))
     def last_seq_never_goes_backwards(self, room: str) -> None:
-        """The counter is read back off the newest record, so it has to survive everything
-        that rewrites the file. It restarts only when the file itself is gone — expiry
-        hiding every record is not that, which is why `_compact` keeps the newest one even
-        when it is expired."""
+        """The counter is read off the newest record, so it must survive everything that
+        rewrites the file. It restarts only when the file is gone — expiry hiding every
+        record is not that, which is why `_compact` keeps the newest one regardless."""
         assert store.last_seq(self.root, room) == self.seq[room]
 
     @rule(key=st.sampled_from(NOTES), value=SAFE_TEXT)
@@ -326,10 +305,9 @@ class StoreLifecycle(RuleBasedStateMachine):
 
     @rule(key=st.sampled_from(NOTES), value=SAFE_TEXT, use_current=st.booleans())
     def compare_and_set(self, key: tuple[str, str], value: str, use_current: bool) -> None:
-        """CAS is the only ordering primitive a note has, and it is what an accumulator or
-        an acceptance record is built on: it must win exactly when the value it was handed
-        is still there, and lose with the *actual* value attached so the loser can rebase
-        without a second read."""
+        """The only ordering primitive a note has, and what an accumulator is built on: it
+        must win exactly when the value it was handed is still there, and lose with the
+        *actual* value attached so the loser can rebase without a second read."""
         self._reap_model()
         current = self.notes.get(key)
         expect = current if (use_current and current is not None) else f"stale-{value}"
@@ -361,8 +339,8 @@ class StoreLifecycle(RuleBasedStateMachine):
             self.note_age[key] = 0
         self._resync()
 
-    # 61 rather than 60, and so on: an age that lands exactly on a threshold is the one
-    # case the guard band has to throw away, so the steps are chosen not to aim at one.
+    # 61 rather than 60: an age landing exactly on a threshold is what the guard band has
+    # to throw away, so the steps are chosen not to aim at one.
     @rule(
         seconds=st.sampled_from(
             [
@@ -370,9 +348,8 @@ class StoreLifecycle(RuleBasedStateMachine):
                 store.EPHEMERAL_TTL_SECONDS + 61,
                 store.STILLBORN_SECONDS + 61,
                 # Just short of the idle rule, so one step can put a note past its own
-                # window while leaving the room it guards inside its. That gap is the only
-                # state in which the guard-note exemption does anything at all, and
-                # reaching it by summing smaller steps takes more of them than a run has.
+                # window while leaving its room inside its — the only state in which the
+                # guard exemption does anything, and unreachable by summing smaller steps.
                 store.IDLE_SECONDS - 3600,
                 store.IDLE_SECONDS + 61,
             ]
@@ -389,8 +366,8 @@ class StoreLifecycle(RuleBasedStateMachine):
 
     @rule()
     def reap(self) -> None:
-        """The reaper is what makes the caps survivable: without it a hard limit only says
-        who got there first. It has to take what is genuinely idle and nothing else."""
+        """What makes the caps survivable — without it a hard limit only says who got
+        there first. It must take what is genuinely idle and nothing else."""
         expected_rooms = {room for room in ROOMS if self._room_verdict(room) == "gone"}
         survivors = {room for room in ROOMS if self._room_verdict(room) == "kept"}
         expected_notes = {key for key in NOTES if self._note_verdict(key) == "gone"}
@@ -420,15 +397,15 @@ class StoreLifecycle(RuleBasedStateMachine):
 
     @invariant()
     def no_room_exceeds_its_ring(self) -> None:
-        """Compaction has to leave the file *under* the ring, not merely at it — otherwise
-        the next append re-triggers it and every write pays a full rewrite."""
+        """Under the ring, not merely at it: otherwise the next append re-triggers
+        compaction and every write pays a full rewrite."""
         for path in (self.root / "rooms").glob("*.jsonl"):
             assert path.stat().st_size <= store.MAX_ROOM_BYTES, f"{path.name} is over its ring"
 
     @invariant()
     def every_record_on_disk_is_one_record(self) -> None:
-        """One JSON object per line, always: a torn or fused line loses the record after it
-        as well as itself, and the whole read path is built on the line being the frame."""
+        """One JSON object per line: the read path is built on the line being the frame, so
+        a fused line loses the record after it as well as itself."""
         for path in (self.root / "rooms").glob("*.jsonl"):
             for raw in path.read_bytes().splitlines():
                 if raw.strip():
@@ -436,9 +413,9 @@ class StoreLifecycle(RuleBasedStateMachine):
 
     @invariant()
     def lifetime_counters_only_go_up(self) -> None:
-        """Nothing else in the store is monotonic — seq dies with its room, compaction drops
-        lines, the reaper deletes files — so a digest that reports "messages since" has
-        these four and nothing else."""
+        """Nothing else in the store is monotonic — seq dies with its room, compaction
+        drops lines, the reaper deletes files — so a "messages since" digest has only
+        these four."""
         counters = store.counters(self.root)
         previous = getattr(self, "_counters", dict.fromkeys(store.COUNTER_KEYS, 0))
         for name in store.COUNTER_KEYS:
@@ -450,11 +427,10 @@ StoreLifecycle.TestCase.settings = settings(
     max_examples=40,
     stateful_step_count=60,
     deadline=None,
-    # Every rule fsyncs, and `advance` rewrites the whole store. Slow by construction, and
-    # slow is not the same as wrong.
+    # Every rule fsyncs and `advance` rewrites the whole store: slow by construction.
     suppress_health_check=[HealthCheck.too_slow, HealthCheck.data_too_large],
-    # A suite that finds a different bug on every run cannot be bisected, and CI is where
-    # this runs. `--hypothesis-seed=random` still explores when someone wants it to.
+    # CI cannot bisect a suite that finds a different bug every run.
+    # `--hypothesis-seed=random` still explores when someone wants it to.
     derandomize=True,
 )
 
@@ -462,10 +438,9 @@ TestStoreLifecycle = StoreLifecycle.TestCase
 
 
 def test_the_model_and_the_sweep_agree_on_these_values():
-    """The machine records the value it sent, not the value the store kept, which is only
-    sound while the two are the same string. `clean_text` rewrites anything invisible and
-    trims the ends, so the generator is built to produce neither — and this is what keeps
-    that true if either the alphabet or the sweep changes."""
+    """The machine records the value it sent, not the value the store kept — sound only
+    while the two are the same string. These hold that if either the alphabet or the sweep
+    changes."""
     for sample in ("a", "hello world", "é日🙂", "a-b_c.d,e:f!g?h", "0123456789"):
         assert store.clean_text(sample) == sample
 

@@ -471,11 +471,9 @@ def openapi_document(base: str, version: str, max_body_bytes: int, max_wait: flo
                             ),
                             "content": {"text/plain": {"schema": {"type": "string"}}},
                         },
-                        # A well-formed signature that does not cover this message is not
-                        # a malformed request, and neither is a room that will not take
-                        # this key: both are refusals of a request the server understood.
-                        # Documented because a client that has only seen 400 here treats
-                        # the 403 as a transport fault and retries the same bytes.
+                        # A signature that does not verify is a refusal, not a malformed
+                        # request. Undocumented, a client reads it as a transport fault and
+                        # retries the identical bytes.
                         "403": {
                             "description": (
                                 "The signature does not verify for this DID, or the room "
@@ -507,10 +505,8 @@ def openapi_document(base: str, version: str, max_body_bytes: int, max_wait: flo
                     },
                 },
                 # `/r/events` is an instance of `/r/{room}`, so the POST route reaches it
-                # like any other room and answers 403 with the correction. Documenting only
-                # GET said the path did not take POST at all, which is a different promise:
-                # a client reading that expects a 405 and gets a refusal it was never told
-                # about. The lane exists and always refuses — both halves are the contract.
+                # and answers 403. Documenting only GET said the path took no POST at all —
+                # a different promise, and one that makes the refusal arrive as a surprise.
                 "post": {
                     "operationId": "postToEvents",
                     "summary": "Always refused: the discovery log is server-written.",
@@ -788,9 +784,8 @@ def openapi_document(base: str, version: str, max_body_bytes: int, max_wait: flo
                             "required": True,
                             "schema": _VALUE_SCHEMA,
                         },
-                        # Both conditions work on this lane and neither was listed, so the
-                        # only documented way to claim a room without racing was the
-                        # unsigned one — which is the lane this exists to replace.
+                        # Both work here and neither was listed, leaving the unsigned lane
+                        # as the only documented way to claim a room without racing.
                         {
                             "in": "query",
                             "name": "if",
@@ -823,11 +818,10 @@ def openapi_document(base: str, version: str, max_body_bytes: int, max_wait: flo
                             ),
                             "content": {"text/plain": {"schema": {"type": "string"}}},
                         },
-                        # Notes have no ring, so the nonce counter is a note too, and it is
-                        # claimed with a compare-and-set: two writers counting up at once
-                        # means one of them loses on the counter rather than on the value.
-                        # A caller that had only seen 400 and 403 here read that as fatal
-                        # and stopped, when the correct response is to count up and re-sign.
+                        # The nonce counter is itself a note, claimed with a
+                        # compare-and-set, so two writers counting up at once means one
+                        # loses on the counter. Undocumented, that reads as fatal when the
+                        # answer is to count up and re-sign.
                         "404": _UNROUTABLE_PATH,
                         "409": {
                             "description": (

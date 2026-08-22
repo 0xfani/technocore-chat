@@ -32,11 +32,10 @@ Then check the health endpoint at <http://localhost:8080/healthz> or read the lo
 - Add tests for behavior that changes. A bug fix should include a regression test that fails
   without the fix and passes with it. Prefer assertions on externally observable behavior over
   private implementation details.
-- Lifecycle behavior — anything touching append, read, expiry, compaction, the reaper, or a
-  conditional note write — is also covered by a Hypothesis state machine in
-  `tests/test_store_stateful.py`. If a change alters what one of those operations promises,
-  the promise belongs there as well as in an example test: the bugs that survive example
-  tests are the ones that need a particular *sequence*.
+- Lifecycle behavior — append, read, expiry, compaction, the reaper, conditional writes —
+  is also covered by a Hypothesis state machine in `tests/test_store_stateful.py`. If a
+  change alters what one of those promises, put the promise there as well: the bugs that
+  survive example tests are the ones needing a particular *sequence*.
 - Preserve the service's bounded-resource and world-writable assumptions. For any new route,
   parameter, or persistent state, consider what an unauthenticated abusive caller can do with it.
 - Avoid unrelated refactors, formatting changes, or version bumps in the same pull request.
@@ -63,10 +62,8 @@ docker build -f docker/Dockerfile -t technocore-chat:local .
 ### The contract check
 
 A second CI job fuzzes the running service against the `/openapi.json` that same instance
-serves, so a response that does not match the document is a failing build rather than a
-surprise for whoever generated a client from it. It runs on every pull request, takes under
-ten seconds, and is deterministic — a failure is a change in this service, not in the
-generator. To reproduce it:
+serves, so a mismatch is a failing build rather than a surprise for whoever generated a
+client. Every pull request, under ten seconds, deterministic. To reproduce:
 
 ```bash
 uv sync --frozen --group contract
@@ -77,17 +74,17 @@ uv run schemathesis run http://localhost:8099/openapi.json --url http://localhos
   --generation-deterministic --max-examples 25
 ```
 
-The exact check list, and why two of Schemathesis's defaults are left out, is in
-`.github/workflows/ci.yml`. Adding a route or a response means adding it to
-`src/manifest.py` in the same change; an undocumented status code fails this job.
+The check list, and why two Schemathesis defaults are left out, is in
+`.github/workflows/ci.yml`. **An undocumented status code fails this job** — a new route or
+response goes into `src/manifest.py` in the same change.
 
 ### Mutation testing
 
 Not part of the pull-request checks. A scoped pass runs weekly
-(`.github/workflows/mutation.yml`) over the code where being subtly wrong is silent and
-expensive — TTL thresholds, the authorization gates, the caps, and the refusal bodies. What
-it covers and why is in `tests/mutation_scope.py`. A surviving mutant is a question, not a
-failure: it means the suite would not have noticed that change. To run it locally:
+(`.github/workflows/mutation.yml`) over the code where being wrong is silent: TTL
+thresholds, the authorization gates, the caps, the refusal bodies. Scope and reasoning are
+in `tests/mutation_scope.py`. A surviving mutant is a question, not a failure — it means
+the suite would not have noticed that change. Locally:
 
 ```bash
 uv sync --frozen --group mutation

@@ -818,10 +818,10 @@ def test_stillborn_rule_does_not_touch_notes(tmp_path):
 
 
 def test_a_torn_line_does_not_make_a_busy_room_look_stillborn(tmp_path):
-    """The stillborn count skips what it cannot parse rather than stopping at it. Stopping
-    would read a room with one bad line as a room with no messages, and the reaper would
-    take a conversation because of a byte a crash left behind. Found by the mutation run:
-    turning that `continue` into a `break` passed the whole suite."""
+    """The stillborn count skips what it cannot parse rather than stopping at it: stopping
+    reads a room with one bad line as a room with no messages, and the reaper takes a
+    conversation because of a byte a crash left behind. From the mutation run — turning
+    that `continue` into a `break` passed the whole suite."""
     import store
 
     path = store.room_path(tmp_path, "torn")
@@ -842,9 +842,8 @@ def test_a_torn_line_does_not_make_a_busy_room_look_stillborn(tmp_path):
 
 
 def test_a_room_that_cannot_be_counted_is_never_stillborn(tmp_path):
-    """Fail open, and only here. Everything else in this service fails closed, but a
-    reaper that treats "I could not read this" as "there is nothing here" deletes live
-    data on the first IO error it meets."""
+    """Fail open, and only here: a reaper that reads "I could not count this" as "there is
+    nothing here" deletes live data on the first IO error it meets."""
     import store
 
     unreadable = tmp_path / "rooms"  # a directory: opening it raises, like a bad file
@@ -853,10 +852,9 @@ def test_a_room_that_cannot_be_counted_is_never_stillborn(tmp_path):
 
 
 def test_a_second_precision_timestamp_still_expires(tmp_path):
-    """Records written before `ts` gained microseconds carry `...:05Z`, and `e-` expiry is
-    the one thing that parses `ts` at all — so the older form has to keep working or an
-    ephemeral room silently stops expiring the oldest records it holds. Both forms coexist
-    by design; this is what keeps the second one real."""
+    """Records predating microsecond `ts` carry `...:05Z`, and expiry is the only thing
+    that parses `ts` — so the older form must keep working or an `e-` room silently stops
+    expiring its oldest records. Both forms coexist by design; this keeps the second real."""
     from datetime import UTC, datetime, timedelta
 
     import store
@@ -2957,10 +2955,9 @@ def test_an_unsupported_verb_is_answered_with_the_get_lane_that_replaces_it(clie
 
 
 def test_a_405_carries_allow_and_names_every_verb_the_path_takes(client):
-    """RFC 9110 §15.5.6 makes `Allow` mandatory on a 405, and the union matters here: two
-    routes share `/r/<room>` and `/kv/<ns>/<key>`, so the first-partial-match header
-    Starlette builds would name `GET, HEAD` on paths that plainly also take POST — ruling
-    out the one verb that would have worked."""
+    """RFC 9110 §15.5.6 makes `Allow` mandatory, and the union matters: two routes share
+    `/r/<room>` and two share `/kv/<ns>/<key>`, so Starlette's first-partial-match header
+    would name `GET, HEAD` on paths that plainly also take POST."""
     for path in ("/r/lobby", "/kv/plans/next"):
         r = client.request("PUT", path)
         assert r.status_code == 405
@@ -3111,11 +3108,10 @@ def test_the_spec_and_the_running_app_describe_the_same_service(client):
     for op in operations:
         assert op["summary"], op
         codes = set(op["responses"])
-        # Normally that outcome is the success case. The one exception is a lane that
-        # exists only to refuse: `/r/events` accepts POST because `/r/{room}` does, and
-        # answers 403 every time. A documented 200 there would be the lie — and documenting
-        # nothing at all is what left a client expecting 405 and reading the 403 as a fault.
-        # It has to say so in prose, or "no 2xx" is indistinguishable from an oversight.
+        # Normally the success case. The exception is a lane that exists only to refuse:
+        # `/r/events` accepts POST because `/r/{room}` does and answers 403 every time, so
+        # a documented 200 would be the lie. It must say so in prose, or "no 2xx" is
+        # indistinguishable from an oversight.
         if not any(code.startswith("2") for code in codes):
             assert "403" in codes, f"{op['operationId']} documents no outcome at all"
             assert "refus" in (op["summary"] + op.get("description", "")).lower(), (
@@ -3124,14 +3120,11 @@ def test_the_spec_and_the_running_app_describe_the_same_service(client):
 
 
 def test_every_status_an_operation_can_return_is_one_it_documents(client):
-    """The contract is what a generated client and a contract fuzzer both believe, and an
-    undocumented status is the failure mode neither of them can recover from: a client
-    that has never been told a 403 is possible treats it as a transport fault and retries
-    the identical bytes forever, and a fuzzer reports the service as broken.
+    """An undocumented status is the failure neither a generated client nor a contract
+    fuzzer recovers from: the client treats an unannounced 403 as a transport fault and
+    retries the identical bytes, the fuzzer calls the service broken.
 
-    So: provoke each refusal against the running app, and require the spec to list it.
-    Every pair below was undocumented at some point — the note lanes in particular
-    described a POST that could reach a namespace the server has never let anyone write.
+    So: provoke each refusal against the running app and require the spec to list it.
     """
     did, sign = _keypair()
     other, _ = _keypair(2)
@@ -3195,11 +3188,10 @@ def test_every_status_an_operation_can_return_is_one_it_documents(client):
 
 
 def test_the_signed_lane_publishes_the_shape_it_actually_enforces(client):
-    """One definition, three places it is published. The room lane's `did` pattern ended
-    in an unbounded `+`, so `did:key:z6Mk` satisfied the contract and nothing else;
-    the note lane's was a bare `string`; the POST body described both in prose a generator
-    cannot read. A client is built against whichever copy it found, so the weakest one was
-    the real contract.
+    """One definition, three places it is published. The room lane's `did` pattern ended in
+    an unbounded `+`, so `did:key:z6Mk` satisfied it; the note lane's was a bare `string`;
+    the POST body was prose no generator can read. A client is built against whichever copy
+    it found, so the weakest one was the contract.
     """
     import didkey
 
@@ -3242,9 +3234,9 @@ def test_the_signed_lane_publishes_the_shape_it_actually_enforces(client):
 
 
 def test_a_free_form_field_publishes_that_it_cannot_be_empty(client):
-    """`required: ["text"]` is satisfied by `""`, which is a 400 here: the single-line
-    sweep leaves nothing visible and the write is refused. A generator reading only
-    `required` emits a client whose empty-message call can never succeed."""
+    """`required: ["text"]` is satisfied by `""`, which is a 400 — the sweep leaves nothing
+    visible. A generator reading only `required` emits a client whose empty-message call
+    can never succeed."""
     import store
 
     doc = client.get("/openapi.json").json()
