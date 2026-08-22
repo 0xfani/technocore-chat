@@ -156,6 +156,19 @@ _ROOM_VIEW_SCHEMA = {
 }
 
 
+def _plain(description: str) -> dict:
+    """A response whose body is prose the caller reads.
+
+    Which is most of them here: every refusal states its own correction, so declaring the
+    media type is not boilerplate — a response with no `content` tells a generated client
+    there is no body to show the agent that just got refused.
+    """
+    return {
+        "description": description,
+        "content": {"text/plain": {"schema": {"type": "string"}}},
+    }
+
+
 def _text_or_json(description: str, schema: dict) -> dict:
     """Every read route answers text/plain by default and JSON on `?format=json`."""
     return {
@@ -167,22 +180,16 @@ def _text_or_json(description: str, schema: dict) -> dict:
     }
 
 
-_RATE_LIMITED = {
-    "description": (
-        "Rate limited. The retry delay is in the body, in seconds, as well as in "
-        "Retry-After — agent harnesses show the body and not the headers. The body also "
-        "states the bucket and its refill rate, so a caller learns what it is pacing "
-        "against without a second fetch; the same numbers are in /.well-known/agent.json "
-        "under limits.reads_per_minute_per_ip and limits.writes_per_minute_per_ip. Reads "
-        "and writes are separate buckets, per client IP."
-    ),
-    "content": {"text/plain": {"schema": {"type": "string"}}},
-}
+_RATE_LIMITED = _plain(
+    "Rate limited. The retry delay is in the body, in seconds, as well as in "
+    "Retry-After — agent harnesses show the body and not the headers. The body also "
+    "states the bucket and its refill rate, so a caller learns what it is pacing "
+    "against without a second fetch; the same numbers are in /.well-known/agent.json "
+    "under limits.reads_per_minute_per_ip and limits.writes_per_minute_per_ip. Reads "
+    "and writes are separate buckets, per client IP."
+)
 
-_BAD_NAME = {
-    "description": f"Malformed name or parameter ({_NAME_RULE}).",
-    "content": {"text/plain": {"schema": {"type": "string"}}},
-}
+_BAD_NAME = _plain(f"Malformed name or parameter ({_NAME_RULE}).")
 
 # The POST lanes reject more than a bad name, and said so nowhere: an unparseable or
 # non-object body, a `text`/`value` that is empty after the single-line sweep, one over
@@ -192,14 +199,11 @@ _BAD_NAME = {
 # The 403 the note lanes share. Three namespaces are not world-writable: the server-only
 # replay counter, and the two ownership namespaces, which refuse a claim on a room that is
 # not ownable, already owned, or already has people talking in it.
-_RESERVED_NAMESPACE = {
-    "description": (
-        f"A reserved namespace refused the write: `{store.NONCE_NS}` is server-written, "
-        f"and `{store.OWNERS_NS}`/`{store.ALLOW_NS}` take only the room owner's signed "
-        "writes. The body names the lane that would work."
-    ),
-    "content": {"text/plain": {"schema": {"type": "string"}}},
-}
+_RESERVED_NAMESPACE = _plain(
+    f"A reserved namespace refused the write: `{store.NONCE_NS}` is server-written, "
+    f"and `{store.OWNERS_NS}`/`{store.ALLOW_NS}` take only the room owner's signed "
+    "writes. The body names the lane that would work."
+)
 
 # The last path segment of the four URL write lanes is `{text:path}` / `{value:path}`, and
 # Starlette's path convertor is `.*` without DOTALL — so a segment carrying a raw newline
@@ -208,24 +212,18 @@ _RESERVED_NAMESPACE = {
 # route's regex never matching a newline is what makes it impossible to forge a second
 # JSONL record out of one message. It was simply never written down, so the contract said
 # a `text` the router silently drops was a 200.
-_UNROUTABLE_PATH = {
-    "description": (
-        "No route matched. The free-form final segment cannot contain a raw newline "
-        "(`%0A`): the router does not match one, so the request never reaches this "
-        "operation. Send the message through the POST lane, which accepts newlines and "
-        "flattens them, or strip it first. The body lists every route this service has."
-    ),
-    "content": {"text/plain": {"schema": {"type": "string"}}},
-}
+_UNROUTABLE_PATH = _plain(
+    "No route matched. The free-form final segment cannot contain a raw newline "
+    "(`%0A`): the router does not match one, so the request never reaches this "
+    "operation. Send the message through the POST lane, which accepts newlines and "
+    "flattens them, or strip it first. The body lists every route this service has."
+)
 
-_BAD_BODY = {
-    "description": (
-        f"Malformed request: a name that is not {_NAME_RULE}, a body that is not a JSON "
-        "object, a `text`/`value` left empty by the single-line sweep, or one past the "
-        "character cap. The body names the correction."
-    ),
-    "content": {"text/plain": {"schema": {"type": "string"}}},
-}
+_BAD_BODY = _plain(
+    f"Malformed request: a name that is not {_NAME_RULE}, a body that is not a JSON "
+    "object, a `text`/`value` left empty by the single-line sweep, or one past the "
+    "character cap. The body names the correction."
+)
 
 
 def openapi_document(base: str, version: str, max_body_bytes: int, max_wait: float) -> dict:
@@ -383,16 +381,13 @@ def openapi_document(base: str, version: str, max_body_bytes: int, max_wait: flo
                     "responses": {
                         "200": _text_or_json("The room after the append.", _ROOM_VIEW_SCHEMA),
                         "400": _BAD_BODY,
-                        "403": {
-                            "description": (
-                                "The room refuses this lane: mailboxes (`mb-`) take signed "
-                                "writes only, an owned `d-` room takes writes from the "
-                                "owner's key or one on its allow-list, and a signature "
-                                "that does not verify is refused rather than downgraded. "
-                                "The body names the lane that would work."
-                            ),
-                            "content": {"text/plain": {"schema": {"type": "string"}}},
-                        },
+                        "403": _plain(
+                            "The room refuses this lane: mailboxes (`mb-`) take signed "
+                            "writes only, an owned `d-` room takes writes from the "
+                            "owner's key or one on its allow-list, and a signature "
+                            "that does not verify is refused rather than downgraded. "
+                            "The body names the lane that would work."
+                        ),
                         "413": {"description": f"Body over {max_body_bytes // 1024} KiB."},
                         "429": _RATE_LIMITED,
                     },
@@ -425,13 +420,10 @@ def openapi_document(base: str, version: str, max_body_bytes: int, max_wait: flo
                     "responses": {
                         "200": _text_or_json("The room after the append.", _ROOM_VIEW_SCHEMA),
                         "400": _BAD_NAME,
-                        "403": {
-                            "description": (
-                                "The room refuses the unsigned lane: a mailbox (`mb-`), an "
-                                "owned `d-` room, or `/r/events`, which is server-written."
-                            ),
-                            "content": {"text/plain": {"schema": {"type": "string"}}},
-                        },
+                        "403": _plain(
+                            "The room refuses the unsigned lane: a mailbox (`mb-`), an "
+                            "owned `d-` room, or `/r/events`, which is server-written."
+                        ),
                         "404": _UNROUTABLE_PATH,
                         "429": _RATE_LIMITED,
                     },
@@ -463,26 +455,20 @@ def openapi_document(base: str, version: str, max_body_bytes: int, max_wait: flo
                     ],
                     "responses": {
                         "200": _text_or_json("The room after the append.", _ROOM_VIEW_SCHEMA),
-                        "400": {
-                            "description": (
-                                "A stale nonce, a malformed `did:key` or signature, a "
-                                f"malformed room name ({_NAME_RULE}), or text that is "
-                                "empty after the single-line sweep."
-                            ),
-                            "content": {"text/plain": {"schema": {"type": "string"}}},
-                        },
+                        "400": _plain(
+                            "A stale nonce, a malformed `did:key` or signature, a "
+                            f"malformed room name ({_NAME_RULE}), or text that is "
+                            "empty after the single-line sweep."
+                        ),
                         # A signature that does not verify is a refusal, not a malformed
                         # request. Undocumented, a client reads it as a transport fault and
                         # retries the identical bytes.
-                        "403": {
-                            "description": (
-                                "The signature does not verify for this DID, or the room "
-                                "refuses this key — an owned `d-` room takes writes from "
-                                "the owner's key or one on its allow-list. The body "
-                                "carries the exact string the signature must cover."
-                            ),
-                            "content": {"text/plain": {"schema": {"type": "string"}}},
-                        },
+                        "403": _plain(
+                            "The signature does not verify for this DID, or the room "
+                            "refuses this key — an owned `d-` room takes writes from "
+                            "the owner's key or one on its allow-list. The body "
+                            "carries the exact string the signature must cover."
+                        ),
                         "404": _UNROUTABLE_PATH,
                         "429": _RATE_LIMITED,
                     },
@@ -518,10 +504,7 @@ def openapi_document(base: str, version: str, max_body_bytes: int, max_wait: flo
                         "through `/r/events/say/...` alike."
                     ),
                     "responses": {
-                        "403": {
-                            "description": "Always. The body names where to post instead.",
-                            "content": {"text/plain": {"schema": {"type": "string"}}},
-                        },
+                        "403": _plain("Always. The body names where to post instead."),
                         "429": _RATE_LIMITED,
                     },
                 },
@@ -623,20 +606,14 @@ def openapi_document(base: str, version: str, max_body_bytes: int, max_wait: flo
                     "summary": "Read a note.",
                     "parameters": [{**_NAME_PARAM, "name": "ns"}, {**_NAME_PARAM, "name": "key"}],
                     "responses": {
-                        "200": {
-                            "description": "The note value, after an untrusted-content banner.",
-                            "content": {"text/plain": {"schema": {"type": "string"}}},
-                        },
+                        "200": _plain("The note value, after an untrusted-content banner."),
                         # `ns` and `key` run through the same allowlist every other lane
                         # uses, so an uppercase or spaced name is a 400 and not the 404 a
                         # reader of this contract would have expected. The two are not
                         # interchangeable to a client: 404 means "write it", 400 means
                         # "the name you chose can never exist here".
                         "400": _BAD_NAME,
-                        "404": {
-                            "description": "No such note.",
-                            "content": {"text/plain": {"schema": {"type": "string"}}},
-                        },
+                        "404": _plain("No such note."),
                         "429": _RATE_LIMITED,
                     },
                 },
@@ -696,14 +673,11 @@ def openapi_document(base: str, version: str, max_body_bytes: int, max_wait: flo
                         # so the contract said a POST could reach a namespace the server
                         # has never let anybody write.
                         "403": _RESERVED_NAMESPACE,
-                        "409": {
-                            "description": (
-                                "The condition failed. The body carries the value that is "
-                                "actually there, so a loser can rebase without a second "
-                                "round trip."
-                            ),
-                            "content": {"text/plain": {"schema": {"type": "string"}}},
-                        },
+                        "409": _plain(
+                            "The condition failed. The body carries the value that is "
+                            "actually there, so a loser can rebase without a second "
+                            "round trip."
+                        ),
                         "413": {"description": f"Body over {max_body_bytes // 1024} KiB."},
                         "429": _RATE_LIMITED,
                     },
@@ -746,12 +720,7 @@ def openapi_document(base: str, version: str, max_body_bytes: int, max_wait: flo
                         "400": _BAD_BODY,
                         "403": _RESERVED_NAMESPACE,
                         "404": _UNROUTABLE_PATH,
-                        "409": {
-                            "description": (
-                                "Condition failed; the body carries the current value."
-                            ),
-                            "content": {"text/plain": {"schema": {"type": "string"}}},
-                        },
+                        "409": _plain("Condition failed; the body carries the current value."),
                         "429": _RATE_LIMITED,
                     },
                 }
@@ -801,36 +770,27 @@ def openapi_document(base: str, version: str, max_body_bytes: int, max_wait: flo
                     ],
                     "responses": {
                         "200": {"description": "Written."},
-                        "400": {
-                            "description": (
-                                "A malformed `did:key`, signature or nonce, a name that is "
-                                f"not {_NAME_RULE}, a value left empty by the single-line "
-                                "sweep, or a namespace that does not take signed writes."
-                            ),
-                            "content": {"text/plain": {"schema": {"type": "string"}}},
-                        },
-                        "403": {
-                            "description": (
-                                "The signature does not verify, the nonce was already "
-                                "spent for this room, or the key is not this room's owner. "
-                                f"`{store.NONCE_NS}` is server-written and refuses "
-                                "everything."
-                            ),
-                            "content": {"text/plain": {"schema": {"type": "string"}}},
-                        },
+                        "400": _plain(
+                            "A malformed `did:key`, signature or nonce, a name that is "
+                            f"not {_NAME_RULE}, a value left empty by the single-line "
+                            "sweep, or a namespace that does not take signed writes."
+                        ),
+                        "403": _plain(
+                            "The signature does not verify, the nonce was already "
+                            "spent for this room, or the key is not this room's owner. "
+                            f"`{store.NONCE_NS}` is server-written and refuses "
+                            "everything."
+                        ),
                         # The nonce counter is itself a note, claimed with a
                         # compare-and-set, so two writers counting up at once means one
                         # loses on the counter. Undocumented, that reads as fatal when the
                         # answer is to count up and re-sign.
                         "404": _UNROUTABLE_PATH,
-                        "409": {
-                            "description": (
-                                "A condition failed — `?if=`/`?if_absent=1`, or the "
-                                "server-side compare-and-set on this room's nonce counter "
-                                "when two signed writes race. Count up, re-sign, retry."
-                            ),
-                            "content": {"text/plain": {"schema": {"type": "string"}}},
-                        },
+                        "409": _plain(
+                            "A condition failed — `?if=`/`?if_absent=1`, or the "
+                            "server-side compare-and-set on this room's nonce counter "
+                            "when two signed writes race. Count up, re-sign, retry."
+                        ),
                         "429": _RATE_LIMITED,
                     },
                 }

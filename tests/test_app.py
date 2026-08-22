@@ -24,6 +24,78 @@ def client(tmp_path, monkeypatch):
     return TestClient(app_module.app)
 
 
+# --------------------------------------------------------------------------- shared helpers
+#
+# Four things every lifecycle test needs, written once. The reaper, the ring and the
+# signed lane are all clock- and race-sensitive, and open-coding that at 40-odd call sites
+# buried the one line of each test that was actually the point.
+
+
+def _age(path, seconds):
+    """Move a file `seconds` into the past.
+
+    The reaper stats mtime, so this is how a test says "nobody has touched this for a
+    week" without waiting one. Callers pass the threshold plus a margin —
+    `_age(p, store.IDLE_SECONDS + 60)` — which reads as the rule it is testing.
+    """
+    when = time.time() - seconds
+    os.utime(path, (when, when))
+
+
+def _arm_reaper(root):
+    """Clear the once-per-REAP_EVERY throttle, so the next write runs a pass."""
+    (root / ".reaped").unlink(missing_ok=True)
+
+
+def _reap_now(root):
+    """Run a pass immediately, throttle and all."""
+    import store
+
+    _arm_reaper(root)
+    store._reap(root)
+
+
+def _race_before_lock(monkeypatch, store, path, action):
+    """Run `action()` once, in the gap between the store reading a file and locking it.
+
+    Every race worth testing here lives in that gap: the store reads, decides, then takes
+    the lock and writes. A second writer landing in between is what the compare-and-set
+    and the reaper's under-lock recheck exist to survive, and this puts one there without
+    threads. Returns a list that is non-empty once the race has actually happened — assert
+    on it, or a test that stopped reaching the gap will pass while proving nothing.
+    """
+    real_locked = store._locked
+    fired = []
+
+    @contextmanager
+    def hook(target):
+        if target == path and not fired:
+            fired.append(True)
+            action()
+        with real_locked(target):
+            yield
+
+    monkeypatch.setattr(store, "_locked", hook)
+    return fired
+
+
+def _race_under_lock(monkeypatch, store, action):
+    """Run `action(target)` after the store takes a lock, before it acts on the file.
+
+    The other half of the same idea, for the checks the store performs *under* the lock:
+    a writer that lands here has beaten the recheck rather than the read.
+    """
+    real_locked = store._locked
+
+    @contextmanager
+    def hook(target):
+        with real_locked(target):
+            action(target)
+            yield
+
+    monkeypatch.setattr(store, "_locked", hook)
+
+
 def test_say_then_read(client):
     r = client.get("/r/lobby/say/alice/hello%20world")
     # `~alice`, not `alice`: an unsigned nick is self-asserted and the text view says so
@@ -744,13 +816,12 @@ def test_orphan_locks_are_swept(tmp_path):
     path = store.room_path(tmp_path, "gone")
     lock = path.with_suffix(".jsonl.lock")
     assert lock.exists()
-    old = time.time() - store.IDLE_SECONDS - 60
     for p in (path, lock):
-        os.utime(p, (old, old))
-    (tmp_path / ".reaped").unlink(missing_ok=True)
+        _age(p, store.IDLE_SECONDS + 60)
+    _arm_reaper(tmp_path)
     store.append(tmp_path, "other", "bot", "hi")  # reaps the data file, keeps its lock
     assert not path.exists()
-    (tmp_path / ".reaped").unlink(missing_ok=True)
+    _arm_reaper(tmp_path)
     store.append(tmp_path, "other", "bot", "again")  # next pass sweeps the orphan lock
     assert not lock.exists()
 
@@ -767,15 +838,12 @@ def test_the_note_side_of_the_sweep_is_wired_up_too(tmp_path):
     lock = note.with_suffix(".txt.lock")
     assert lock.exists(), "premise: note writes leave a sidecar lock"
 
-    old = time.time() - store.IDLE_SECONDS - 60
     for target in (note, lock):
-        os.utime(target, (old, old))
-    (tmp_path / ".reaped").unlink(missing_ok=True)
-    store._reap(tmp_path)  # takes the data file, keeps the lock a writer might hold
+        _age(target, store.IDLE_SECONDS + 60)
+    _reap_now(tmp_path)  # takes the data file, keeps the lock a writer might hold
     assert not note.exists()
 
-    (tmp_path / ".reaped").unlink(missing_ok=True)
-    store._reap(tmp_path)
+    _reap_now(tmp_path)
     assert not lock.exists(), "an orphaned note lock is swept like a room's"
     # …and the namespace directory goes with the last note in it, or every namespace ever
     # written stays on disk as an empty directory.
@@ -793,10 +861,8 @@ def test_a_lock_is_never_swept_while_its_data_file_is_there(tmp_path):
     path = store.room_path(tmp_path, "quiet")
     lock = path.with_suffix(".jsonl.lock")
 
-    old = time.time() - store.IDLE_SECONDS - 60
-    os.utime(lock, (old, old))  # the lock is stale; the room it guards is not
-    (tmp_path / ".reaped").unlink(missing_ok=True)
-    store._reap(tmp_path)
+    _age(lock, store.IDLE_SECONDS + 60)  # the lock is stale; the room it guards is not
+    _reap_now(tmp_path)
 
     assert path.exists() and lock.exists()
 
@@ -810,24 +876,16 @@ def test_one_unreadable_file_does_not_abort_the_whole_pass(tmp_path, monkeypatch
 
     for room in ("first-idle", "second-idle"):
         store.append(tmp_path, room, "bot", "hi")
-    old = time.time() - store.IDLE_SECONDS - 60
     for room in ("first-idle", "second-idle"):
-        os.utime(store.room_path(tmp_path, room), (old, old))
+        _age(store.room_path(tmp_path, room), store.IDLE_SECONDS + 60)
 
-    real_locked = store._locked
-    exploded = []
+    def explode():
+        raise OSError("racing writer")
 
-    @contextmanager
-    def explode_once(target):
-        if target.name.startswith("first-idle") and not exploded:
-            exploded.append(True)
-            raise OSError("racing writer")
-        with real_locked(target):
-            yield
-
-    monkeypatch.setattr(store, "_locked", explode_once)
-    (tmp_path / ".reaped").unlink(missing_ok=True)
-    store._reap(tmp_path)
+    exploded = _race_before_lock(
+        monkeypatch, store, store.room_path(tmp_path, "first-idle"), explode
+    )
+    _reap_now(tmp_path)
 
     assert exploded, "the failure never happened — this test proved nothing"
     assert not store.room_path(tmp_path, "second-idle").exists(), "the pass stopped early"
@@ -843,13 +901,11 @@ def test_reap_counts_every_room_it_takes_not_just_the_last(tmp_path):
     for room in ("ended-one", "ended-two", "ended-three"):
         store.append(tmp_path, room, "bot", "hi")
         store.append(tmp_path, room, "other", "yes")  # answered, so the idle rule takes it
-    old = time.time() - store.IDLE_SECONDS - 60
     for room in ("ended-one", "ended-two", "ended-three"):
-        os.utime(store.room_path(tmp_path, room), (old, old))
+        _age(store.room_path(tmp_path, room), store.IDLE_SECONDS + 60)
 
     before = store.counters(tmp_path)["reaped_idle"]
-    (tmp_path / ".reaped").unlink(missing_ok=True)
-    store._reap(tmp_path)
+    _reap_now(tmp_path)
     assert store.counters(tmp_path)["reaped_idle"] == before + 3
 
 
@@ -881,19 +937,13 @@ def test_reap_keeps_a_file_refreshed_after_the_stat(tmp_path, monkeypatch):
 
     store.append(tmp_path, "live", "bot", "hi")
     path = store.room_path(tmp_path, "live")
-    old = time.time() - store.IDLE_SECONDS - 60
-    os.utime(path, (old, old))
-    real_locked = store._locked
+    _age(path, store.IDLE_SECONDS + 60)
 
-    @contextmanager
-    def refresh_then_lock(target):
-        with real_locked(target):
-            os.utime(target, None)  # a writer got in between the stat and the unlink
-            yield
+    def refresh(target):
+        os.utime(target, None)  # a writer got in between the stat and the unlink
 
-    monkeypatch.setattr(store, "_locked", refresh_then_lock)
-    (tmp_path / ".reaped").unlink(missing_ok=True)
-    store._reap(tmp_path)
+    _race_under_lock(monkeypatch, store, refresh)
+    _reap_now(tmp_path)
     assert path.exists()
 
 
@@ -994,9 +1044,8 @@ def test_idle_rooms_are_reaped_so_squatting_expires(tmp_path, monkeypatch):
 
     monkeypatch.setattr(store, "MAX_ROOMS", 2)
     store.append(tmp_path, "squat", "bot", "hi")
-    old = time.time() - store.IDLE_SECONDS - 60
-    os.utime(store.room_path(tmp_path, "squat"), (old, old))
-    (tmp_path / ".reaped").unlink(missing_ok=True)  # force a reap pass
+    _age(store.room_path(tmp_path, "squat"), store.IDLE_SECONDS + 60)
+    _arm_reaper(tmp_path)  # force a reap pass
     store.append(tmp_path, "fresh", "bot", "hi")
     assert not store.room_path(tmp_path, "squat").exists()
     assert store.room_path(tmp_path, "fresh").exists()
@@ -1007,14 +1056,12 @@ def test_stillborn_rooms_go_after_a_day_but_answered_ones_keep_the_week(tmp_path
     week. Both rooms are idle for the same time — only the reply tells them apart."""
     import store
 
-    day_old = time.time() - store.STILLBORN_SECONDS - 60
     store.append(tmp_path, "monologue", "bot", "anyone here?")
     store.append(tmp_path, "answered", "bot", "anyone here?")
     store.append(tmp_path, "answered", "other", "yes")
     for room in ("monologue", "answered"):
-        os.utime(store.room_path(tmp_path, room), (day_old, day_old))
-    (tmp_path / ".reaped").unlink(missing_ok=True)
-    store._reap(tmp_path)
+        _age(store.room_path(tmp_path, room), store.STILLBORN_SECONDS + 60)
+    _reap_now(tmp_path)
     assert not store.room_path(tmp_path, "monologue").exists()
     assert store.room_path(tmp_path, "answered").exists()
 
@@ -1025,10 +1072,8 @@ def test_stillborn_room_survives_its_first_day(tmp_path):
     import store
 
     store.append(tmp_path, "waiting", "bot", "anyone here?")
-    hour_old = time.time() - 3600
-    os.utime(store.room_path(tmp_path, "waiting"), (hour_old, hour_old))
-    (tmp_path / ".reaped").unlink(missing_ok=True)
-    store._reap(tmp_path)
+    _age(store.room_path(tmp_path, "waiting"), 3600)
+    _reap_now(tmp_path)
     assert store.room_path(tmp_path, "waiting").exists()
 
 
@@ -1039,10 +1084,8 @@ def test_stillborn_rule_does_not_touch_notes(tmp_path):
 
     store.note_set(tmp_path, store.TOPIC_NS, "somewhere", "what this room is for")
     path = store.note_path(tmp_path, store.TOPIC_NS, "somewhere")
-    day_old = time.time() - store.STILLBORN_SECONDS - 60
-    os.utime(path, (day_old, day_old))
-    (tmp_path / ".reaped").unlink(missing_ok=True)
-    store._reap(tmp_path)
+    _age(path, store.STILLBORN_SECONDS + 60)
+    _reap_now(tmp_path)
     assert path.exists()
 
 
@@ -1060,10 +1103,8 @@ def test_a_torn_line_does_not_make_a_busy_room_look_stillborn(tmp_path):
         b'{"seq":2,"ts":"2026-01-01T00:00:01.000000Z","from":"a","text":"anyone here?"}\n'
         b'{"seq":3,"ts":"2026-01-01T00:00:02.000000Z","from":"b","text":"yes"}\n'
     )
-    day_old = time.time() - store.STILLBORN_SECONDS - 60
-    os.utime(path, (day_old, day_old))
-    (tmp_path / ".reaped").unlink(missing_ok=True)
-    store._reap(tmp_path)
+    _age(path, store.STILLBORN_SECONDS + 60)
+    _reap_now(tmp_path)
 
     assert path.exists(), "two answered messages and a torn line is not a monologue"
     # …and the messages either side of the torn line are still readable.
@@ -1109,21 +1150,15 @@ def test_reap_spares_a_stillborn_room_answered_after_the_count(tmp_path, monkeyp
 
     store.append(tmp_path, "racing", "bot", "anyone here?")
     path = store.room_path(tmp_path, "racing")
-    day_old = time.time() - store.STILLBORN_SECONDS - 60
-    os.utime(path, (day_old, day_old))
-    real_locked = store._locked
+    _age(path, store.STILLBORN_SECONDS + 60)
 
-    @contextmanager
-    def answer_then_lock(target):
-        with real_locked(target):
-            with target.open("ab") as f:  # a reply got in between the count and the unlink
-                f.write(b'{"seq":2,"ts":"2026-01-01T00:00:00Z","from":"other","text":"yes"}\n')
-            os.utime(target, (day_old, day_old))  # still idle: only the count saves it
-            yield
+    def answer(target):
+        with target.open("ab") as f:  # a reply got in between the count and the unlink
+            f.write(b'{"seq":2,"ts":"2026-01-01T00:00:00Z","from":"other","text":"yes"}\n')
+        _age(target, store.STILLBORN_SECONDS + 60)  # still idle: only the count saves it
 
-    monkeypatch.setattr(store, "_locked", answer_then_lock)
-    (tmp_path / ".reaped").unlink(missing_ok=True)
-    store._reap(tmp_path)
+    _race_under_lock(monkeypatch, store, answer)
+    _reap_now(tmp_path)
     assert path.exists()
 
 
@@ -1374,8 +1409,7 @@ def test_reaper_spares_active_files_and_throttles_itself(tmp_path, monkeypatch):
     # a reap ran on the first write, so the marker exists and the next pass is throttled
     marker = tmp_path / ".reaped"
     assert marker.exists()
-    stale = time.time() - store.IDLE_SECONDS - 60
-    os.utime(store.room_path(tmp_path, "other"), (stale, stale))
+    _age(store.room_path(tmp_path, "other"), store.IDLE_SECONDS + 60)
     store.append(tmp_path, "active", "bot", "again")
     assert store.room_path(tmp_path, "other").exists()  # throttled: not reaped yet
     marker.unlink()
@@ -1389,8 +1423,7 @@ def test_rooms_overview_carries_stats_newest_first(client, tmp_path):
     client.get("/r/old/say/bot/first")
     client.get("/r/busy/say/bot/a")
     client.get("/r/busy/say/bot/b")
-    stale = time.time() - 3600
-    os.utime(store.room_path(tmp_path, "old"), (stale, stale))
+    _age(store.room_path(tmp_path, "old"), 3600)
 
     view = client.get("/rooms?format=json").json()
     names = [r["room"] for r in view["rooms"]]
@@ -2057,6 +2090,21 @@ def test_a_failed_announcement_never_fails_the_write(tmp_path, monkeypatch):
 # ------------------------------------------------------------ signed writes (did:key)
 
 
+def _multibase(raw: bytes) -> str:
+    """base58btc, the encoding a `did:key` multibase segment is written in.
+
+    Spelt out rather than imported: `didkey` only ever decodes, and a test that built its
+    keys with the decoder's own inverse could not catch the decoder being wrong.
+    """
+    alphabet = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
+    n = int.from_bytes(raw, "big")
+    out = ""
+    while n:
+        n, rem = divmod(n, 58)
+        out = alphabet[rem] + out
+    return out
+
+
 def _keypair(seed: int = 1):
     """A deterministic Ed25519 key and its did:key, so a failure is reproducible."""
     import base64
@@ -2068,27 +2116,10 @@ def _keypair(seed: int = 1):
     key = Ed25519PrivateKey.from_private_bytes(bytes([seed]) * 32)
     raw = key.public_key().public_bytes_raw()
 
-    alphabet = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
-    n = int.from_bytes(didkey.MULTICODEC_ED25519 + raw, "big")
-    out = ""
-    while n:
-        n, rem = divmod(n, 58)
-        out = alphabet[rem] + out
-
     def sign(message: str) -> str:
         return base64.urlsafe_b64encode(key.sign(message.encode())).decode().rstrip("=")
 
-    return f"{didkey.PREFIX}z{out}", sign
-
-
-def _multibase(raw: bytes) -> str:
-    alphabet = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
-    n = int.from_bytes(raw, "big")
-    out = ""
-    while n:
-        n, rem = divmod(n, 58)
-        out = alphabet[rem] + out
-    return out
+    return f"{didkey.PREFIX}z{_multibase(didkey.MULTICODEC_ED25519 + raw)}", sign
 
 
 def test_a_did_key_has_exactly_one_spelling(client):
@@ -2466,21 +2497,19 @@ def test_ownership_guards_do_not_expire_out_from_under_a_live_room(tmp_path):
     store.append(tmp_path, "d-live", "bot", "hi")
     for ns, value in ((store.OWNERS_NS, did), (store.ALLOW_NS, did), (store.NONCE_NS, "7")):
         store.note_set(tmp_path, ns, "d-live", value)
-        old = time.time() - store.IDLE_SECONDS - 60
-        os.utime(store.note_path(tmp_path, ns, "d-live"), (old, old))
+        _age(store.note_path(tmp_path, ns, "d-live"), store.IDLE_SECONDS + 60)
 
-    (tmp_path / ".reaped").unlink(missing_ok=True)
+    _arm_reaper(tmp_path)
     store.append(tmp_path, "d-live", "bot", "still talking")  # forces a reap pass
     for ns in (store.OWNERS_NS, store.ALLOW_NS, store.NONCE_NS):
         assert store.note_get(tmp_path, ns, "d-live") is not None, ns
 
     # once the room itself goes, the guards go with it — bounded exactly as before
-    old = time.time() - store.IDLE_SECONDS - 60
-    os.utime(store.room_path(tmp_path, "d-live"), (old, old))
-    (tmp_path / ".reaped").unlink(missing_ok=True)
+    _age(store.room_path(tmp_path, "d-live"), store.IDLE_SECONDS + 60)
+    _arm_reaper(tmp_path)
     store.append(tmp_path, "elsewhere", "bot", "hi")
     assert not store.room_path(tmp_path, "d-live").exists()
-    (tmp_path / ".reaped").unlink(missing_ok=True)
+    _arm_reaper(tmp_path)
     store.append(tmp_path, "elsewhere", "bot", "again")
     for ns in (store.OWNERS_NS, store.ALLOW_NS, store.NONCE_NS):
         assert store.note_get(tmp_path, ns, "d-live") is None, ns
@@ -2663,19 +2692,12 @@ def test_two_signed_writers_cannot_both_spend_one_nonce(client, tmp_path, monkey
     assert _claim(client, "d-race", owner, owner_sign).status_code == 200  # burns nonce 1
 
     counter = store.note_path(tmp_path, store.NONCE_NS, "d-race")
-    real_locked = store._locked
-    raced = []
-
-    @contextmanager
-    def spend_then_lock(target):
-        # The other writer gets there between our read of the counter and our claim on it.
-        if target == counter and not raced:
-            raced.append(True)
-            counter.write_text("9", encoding="utf-8")
-        with real_locked(target):
-            yield
-
-    monkeypatch.setattr(store, "_locked", spend_then_lock)
+    raced = _race_before_lock(
+        monkeypatch,
+        store,
+        counter,
+        lambda: counter.write_text("9", encoding="utf-8"),  # the other writer got there
+    )
     lost = _set_signed(client, store.ALLOW_NS, "d-race", owner, owner_sign, owner, nonce=5)
 
     assert raced, "the race never happened — this test proved nothing"
@@ -2698,19 +2720,12 @@ def test_two_first_claims_cannot_both_create_one_nonce_counter(client, tmp_path,
 
     owner, owner_sign = _keypair()
     counter = store.note_path(tmp_path, store.NONCE_NS, "d-first")
-    real_locked = store._locked
-    raced = []
 
-    @contextmanager
-    def create_then_lock(target):
-        if target == counter and not raced:
-            raced.append(True)
-            counter.parent.mkdir(parents=True, exist_ok=True)
-            counter.write_text("1", encoding="utf-8")  # the other claim got there first
-        with real_locked(target):
-            yield
+    def create():
+        counter.parent.mkdir(parents=True, exist_ok=True)
+        counter.write_text("1", encoding="utf-8")  # the other claim got there first
 
-    monkeypatch.setattr(store, "_locked", create_then_lock)
+    raced = _race_before_lock(monkeypatch, store, counter, create)
     lost = _claim(client, "d-first", owner, owner_sign)
 
     assert raced, "the race never happened — this test proved nothing"
@@ -3153,11 +3168,9 @@ def test_message_counter_survives_the_reaper(tmp_path):
         store.append(tmp_path, "doomed", "bot", f"m{i}")
     assert store.counters(tmp_path)["messages"] == 3
 
-    old = time.time() - store.IDLE_SECONDS - 60
     for room in ("doomed", "events"):
-        os.utime(store.room_path(tmp_path, room), (old, old))
-    (tmp_path / ".reaped").unlink(missing_ok=True)
-    store._reap(tmp_path)
+        _age(store.room_path(tmp_path, room), store.IDLE_SECONDS + 60)
+    _reap_now(tmp_path)
 
     assert not store.room_path(tmp_path, "doomed").exists()
     assert store.counters(tmp_path)["messages"] == 3  # monotonic across the deletion
@@ -3172,12 +3185,9 @@ def test_reap_counters_tell_the_two_rules_apart(tmp_path):
     store.append(tmp_path, "monologue", "bot", "anyone here?")
     store.append(tmp_path, "ended", "bot", "hi")
     store.append(tmp_path, "ended", "other", "bye")
-    stale = time.time() - store.IDLE_SECONDS - 60
-    day_old = time.time() - store.STILLBORN_SECONDS - 60
-    os.utime(store.room_path(tmp_path, "monologue"), (day_old, day_old))
-    os.utime(store.room_path(tmp_path, "ended"), (stale, stale))
-    (tmp_path / ".reaped").unlink(missing_ok=True)
-    store._reap(tmp_path)
+    _age(store.room_path(tmp_path, "monologue"), store.STILLBORN_SECONDS + 60)
+    _age(store.room_path(tmp_path, "ended"), store.IDLE_SECONDS + 60)
+    _reap_now(tmp_path)
 
     counts = store.counters(tmp_path)
     assert (counts["reaped_stillborn"], counts["reaped_idle"]) == (1, 1)
