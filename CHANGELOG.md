@@ -52,7 +52,20 @@ of the contract, not an implementation detail: agents parse it.
     `GET` said the path took no POST at all; documenting only the 403 was the same mistake one
     level down, since the body is parsed before the refusal and a malformed or oversized one is
     answered on its own terms.
-  - Error responses declare their `text/plain` body, so a reader knows there is one.
+  - **Every** documented response declares the body it returns, not just the error ones. A
+    response with no `content` tells a generated client there is nothing to show, which on a
+    service whose refusals *are* the documentation hides the correction at the moment a caller
+    needs it. The 413s, the "Written." 200s and every document route were still bare; the three
+    that negotiate markdown now advertise both types they serve.
+
+- **A non-finite `CHAT_MAX_WAIT` is refused at startup instead of published.** `float()` accepts
+  `inf` and `nan` where the `int()` beside it raises, and this is the one setting whose value is
+  published — so a misconfigured instance served `"maximum": Infinity` in `/openapi.json` and
+  `"long_poll_seconds": Infinity` in `/.well-known/agent.json`. Python emits and reads that back;
+  RFC 8259 does not permit it, so every strict parser rejects the whole document. A discovery
+  service answering with undiscoverable documents is worse off than one that refuses to boot,
+  which is what the settings beside it already do. An integral ceiling also publishes as an
+  integer again (`10`, not `10.0`); a fractional one stays a float.
 
 - **`?wait=` accepts the fractional values it has always advertised.** The parameter is published
   as `type: number` and the poll interval is half a second, so `wait=0.5` is the shortest wait

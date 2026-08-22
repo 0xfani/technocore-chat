@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import math
 import os
 import secrets
 import time
@@ -884,11 +885,31 @@ def rooms(request: Request) -> Response:
 # attack, so waiters are capped twice — per IP, and globally — and exceeding either
 # degrades to an immediate empty reply rather than an error. A caller that cannot get a
 # slot is exactly as well off as before long-polling existed.
+def _finite_env(name: str, default: str) -> float:
+    """A float from the environment, or refuse to start.
+
+    Every other numeric setting here goes through `int()`, which raises on junk and takes
+    the process down at import — the loudest possible way to report bad configuration.
+    `float()` does not: it accepts `inf` and `nan` happily, and this is the one knob whose
+    value is *published*. A non-finite ceiling reaches /openapi.json and
+    /.well-known/agent.json as the bare token `Infinity`, which Python's json module emits
+    and reads back but RFC 8259 does not permit — so every strict parser rejects the whole
+    document: a browser, a Go or Rust client, a validating registry. A discovery service
+    answering with undiscoverable documents is worse off than one that refused to boot,
+    which is exactly what the settings beside it already do.
+    """
+    raw = os.environ.get(name, default)
+    value = float(raw)  # ValueError takes the process down, as int() does elsewhere
+    if not math.isfinite(value):
+        raise ValueError(f"{name} must be a finite number, got {raw!r}")
+    return value
+
+
 # Ceiling on ?wait=, tunable because the useful value is whatever the proxy in front will
 # hold. Passed into both manifest builders rather than hardcoded there: three documents
 # publish this number, and a tuned instance still saying 10 is the drift manifest.py
 # exists to prevent.
-MAX_WAIT = max(0.0, float(os.environ.get("CHAT_MAX_WAIT", "10")))
+MAX_WAIT = max(0.0, _finite_env("CHAT_MAX_WAIT", "10"))
 WAIT_POLL = 0.5  # a new message surfaces within this, so ?wait=0.5 is the useful floor
 MAX_WAITERS_TOTAL = 64
 MAX_WAITERS_PER_IP = 4

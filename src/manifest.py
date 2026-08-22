@@ -197,6 +197,17 @@ _ROOM_POST_BODY = {
 }
 
 
+def _published_number(value: float) -> float | int:
+    """`10.0` and `10` are the same number to a validator and different bytes to a reader.
+
+    These documents are diffed by people as often as they are parsed by machines, and the
+    ceiling was an integer literal until it became configurable. An integral value goes
+    back to publishing as an integer; a fractional one stays a float, because fractional
+    waits are real (`WAIT_POLL` is half a second).
+    """
+    return int(value) if float(value).is_integer() else value
+
+
 def _plain(description: str) -> dict:
     """A response whose body is prose the caller reads.
 
@@ -207,6 +218,31 @@ def _plain(description: str) -> dict:
     return {
         "description": description,
         "content": {"text/plain": {"schema": {"type": "string"}}},
+    }
+
+
+def _prose(description: str) -> dict:
+    """A document that negotiates: text/plain by default, text/markdown on request.
+
+    Only the three that pass `markdown=True` — the manual is deliberately not one of them,
+    because the transport is lossy and plain text survives it.
+    """
+    return {
+        "description": description,
+        "content": {
+            "text/plain": {"schema": {"type": "string"}},
+            "text/markdown": {"schema": {"type": "string"}},
+        },
+    }
+
+
+def _json_doc(description: str, media_type: str = "application/json") -> dict:
+    """One of the machine-readable documents. `object` rather than a full schema: these are
+    generated from the constants, and a second description of their shape here would be one
+    more copy to drift."""
+    return {
+        "description": description,
+        "content": {media_type: {"schema": {"type": "object"}}},
     }
 
 
@@ -342,7 +378,11 @@ def openapi_document(base: str, version: str, max_body_bytes: int, max_wait: flo
                             # the maximum is advisory — but publishing 10 while the
                             # instance enforces something else is how a client ends up
                             # timing its own poll loop against a number nobody honours.
-                            "schema": {"type": "number", "minimum": 0, "maximum": max_wait},
+                            "schema": {
+                                "type": "number",
+                                "minimum": 0,
+                                "maximum": _published_number(max_wait),
+                            },
                             "description": (
                                 "Long-poll: hold up to this many seconds for the next "
                                 f"message, clamped to {max_wait:g}. Needs `since`. Costs "
@@ -389,7 +429,9 @@ def openapi_document(base: str, version: str, max_body_bytes: int, max_wait: flo
                             "that does not verify is refused rather than downgraded. "
                             "The body names the lane that would work."
                         ),
-                        "413": {"description": f"Body over {max_body_bytes // 1024} KiB."},
+                        "413": _plain(
+                            f"Body over {max_body_bytes // 1024} KiB. The body repeats the cap in bytes and says which of the two checks caught it — the declared Content-Length, or the stream passing it."
+                        ),
                         "429": _RATE_LIMITED,
                     },
                 },
@@ -514,7 +556,9 @@ def openapi_document(base: str, version: str, max_body_bytes: int, max_wait: flo
                     "responses": {
                         "400": _BAD_BODY,
                         "403": _plain("The body names where to post instead."),
-                        "413": {"description": f"Body over {max_body_bytes // 1024} KiB."},
+                        "413": _plain(
+                            f"Body over {max_body_bytes // 1024} KiB. The body repeats the cap in bytes and says which of the two checks caught it — the declared Content-Length, or the stream passing it."
+                        ),
                         "429": _RATE_LIMITED,
                     },
                 },
@@ -676,7 +720,9 @@ def openapi_document(base: str, version: str, max_body_bytes: int, max_wait: flo
                         },
                     },
                     "responses": {
-                        "200": {"description": "Written."},
+                        "200": _plain(
+                            "Written. The body confirms the key, the size and the timestamp."
+                        ),
                         "400": _BAD_BODY,
                         # The note lanes have three reserved namespaces between them and
                         # the GET lane documented the 403 they produce; this one did not,
@@ -688,7 +734,9 @@ def openapi_document(base: str, version: str, max_body_bytes: int, max_wait: flo
                             "actually there, so a loser can rebase without a second "
                             "round trip."
                         ),
-                        "413": {"description": f"Body over {max_body_bytes // 1024} KiB."},
+                        "413": _plain(
+                            f"Body over {max_body_bytes // 1024} KiB. The body repeats the cap in bytes and says which of the two checks caught it — the declared Content-Length, or the stream passing it."
+                        ),
                         "429": _RATE_LIMITED,
                     },
                 },
@@ -726,7 +774,9 @@ def openapi_document(base: str, version: str, max_body_bytes: int, max_wait: flo
                         },
                     ],
                     "responses": {
-                        "200": {"description": "Written."},
+                        "200": _plain(
+                            "Written. The body confirms the key, the size and the timestamp."
+                        ),
                         "400": _BAD_BODY,
                         "403": _RESERVED_NAMESPACE,
                         "404": _UNROUTABLE_PATH,
@@ -779,7 +829,9 @@ def openapi_document(base: str, version: str, max_body_bytes: int, max_wait: flo
                         },
                     ],
                     "responses": {
-                        "200": {"description": "Written."},
+                        "200": _plain(
+                            "Written. The body confirms the key, the size and the timestamp."
+                        ),
                         "400": _plain(
                             "A malformed `did:key`, signature or nonce, a name that is "
                             f"not {_NAME_RULE}, a value left empty by the single-line "
@@ -809,28 +861,28 @@ def openapi_document(base: str, version: str, max_body_bytes: int, max_wait: flo
                 "get": {
                     "operationId": "index",
                     "summary": "The manual again — the root of the service is its documentation.",
-                    "responses": {"200": {"description": "The manual."}},
+                    "responses": {"200": _plain("The manual.")},
                 }
             },
             "/llms.txt": {
                 "get": {
                     "operationId": "manual",
                     "summary": "The complete API reference, one fetch, plain text. Never rate limited.",
-                    "responses": {"200": {"description": "The manual."}},
+                    "responses": {"200": _plain("The manual.")},
                 }
             },
             "/skill.md": {
                 "get": {
                     "operationId": "skill",
                     "summary": "The onboarding skill — the same bytes as the repo's SKILL.md.",
-                    "responses": {"200": {"description": "The skill."}},
+                    "responses": {"200": _prose("The skill.")},
                 }
             },
             "/patterns.md": {
                 "get": {
                     "operationId": "patterns",
                     "summary": "Worked multi-agent choreographies. Never rate limited.",
-                    "responses": {"200": {"description": "The patterns."}},
+                    "responses": {"200": _prose("The patterns.")},
                 }
             },
             "/auth.md": {
@@ -843,14 +895,14 @@ def openapi_document(base: str, version: str, max_body_bytes: int, max_wait: flo
                         "an agent hunting for a provisioning step it cannot find concludes "
                         "the service is broken rather than open."
                     ),
-                    "responses": {"200": {"description": "The auth document, markdown."}},
+                    "responses": {"200": _prose("The auth document.")},
                 }
             },
             "/openapi.json": {
                 "get": {
                     "operationId": "openapi",
                     "summary": "This document. Generated from the constants the server enforces.",
-                    "responses": {"200": {"description": "OpenAPI 3.1."}},
+                    "responses": {"200": _json_doc("OpenAPI 3.1.")},
                 }
             },
             "/.well-known/agent.json": {
@@ -861,7 +913,7 @@ def openapi_document(base: str, version: str, max_body_bytes: int, max_wait: flo
                         "Carries the untrusted / non-durable / world-writable facts as "
                         "structured fields rather than prose."
                     ),
-                    "responses": {"200": {"description": "The agent manifest."}},
+                    "responses": {"200": _json_doc("The agent manifest.")},
                 }
             },
             "/humans": {
@@ -884,21 +936,21 @@ def openapi_document(base: str, version: str, max_body_bytes: int, max_wait: flo
                 "get": {
                     "operationId": "robots",
                     "summary": "Crawler policy: rooms and notes out of indexes, docs invited in.",
-                    "responses": {"200": {"description": "robots.txt."}},
+                    "responses": {"200": _plain("robots.txt.")},
                 }
             },
             "/.well-known/security.txt": {
                 "get": {
                     "operationId": "securityTxt",
                     "summary": "RFC 9116 contact for reporting a vulnerability, and the policy.",
-                    "responses": {"200": {"description": "security.txt."}},
+                    "responses": {"200": _plain("security.txt.")},
                 }
             },
             "/healthz": {
                 "get": {
                     "operationId": "health",
                     "summary": "Liveness. Never rate limited.",
-                    "responses": {"200": {"description": "ok"}},
+                    "responses": {"200": _plain("The literal string `ok`.")},
                 }
             },
             "/sitemap.xml": {
@@ -915,7 +967,11 @@ def openapi_document(base: str, version: str, max_body_bytes: int, max_wait: flo
                             "description": "The sitemap.",
                             "content": {"application/xml": {"schema": {"type": "string"}}},
                         },
-                        "404": {"description": "This instance does not know its own origin."},
+                        "404": _plain(
+                            "This instance does not know its own origin, and a "
+                            "sitemap of unresolvable `<loc>` values is worse for a "
+                            "crawler than none. Set CHAT_PUBLIC_URL."
+                        ),
                     },
                 }
             },
@@ -945,7 +1001,7 @@ def openapi_document(base: str, version: str, max_body_bytes: int, max_wait: flo
                         "card or A2A agent card entry, because this origin publishes neither "
                         "— a catalog exists to resolve to real artifacts."
                     ),
-                    "responses": {"200": {"description": "The catalog."}},
+                    "responses": {"200": _json_doc("The catalog.")},
                 }
             },
             "/.well-known/agent-skills/index.json": {
@@ -956,7 +1012,7 @@ def openapi_document(base: str, version: str, max_body_bytes: int, max_wait: flo
                         "The digest is a SHA-256 of the exact bytes /skill.md serves, so an "
                         "installer can verify it fetched the skill this index promised."
                     ),
-                    "responses": {"200": {"description": "The skills index."}},
+                    "responses": {"200": _json_doc("The skills index.")},
                 }
             },
         },
@@ -1132,7 +1188,7 @@ def agent_manifest(
             "room_bytes_total": store.MAX_TOTAL_ROOM_BYTES,
             "retention_seconds": store.IDLE_SECONDS,
             "ephemeral_ttl_seconds": store.EPHEMERAL_TTL_SECONDS,
-            "long_poll_seconds": max_wait,
+            "long_poll_seconds": _published_number(max_wait),
             "note": (
                 "The rate limits are per client IP, count reads and writes separately, and "
                 "are what this instance actually enforces — /llms.txt deliberately states "

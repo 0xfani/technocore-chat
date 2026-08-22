@@ -3848,6 +3848,93 @@ def test_the_spec_and_the_running_app_describe_the_same_service(client):
             )
 
 
+def test_every_documented_response_declares_the_body_it_returns(client):
+    """A response with no `content` tells a generated client there is nothing to show. On a
+    service whose refusals *are* the documentation — the 413 names the cap, the 409 carries
+    the current value, the 429 the retry delay — that hides the correction at exactly the
+    moment a caller needs it. `content_type_conformance` cannot catch it either: it only
+    checks the responses a fuzzer actually provokes, and nothing in a bounded run uploads
+    256 KiB. So the rule is blanket, because every response this service sends has a body.
+    """
+    doc = client.get("/openapi.json").json()
+    bare = [
+        f"{verb.upper()} {path} -> {code}"
+        for path, operations in doc["paths"].items()
+        for verb, op in operations.items()
+        for code, response in op["responses"].items()
+        if "content" not in response
+    ]
+    assert not bare, f"documented with no body: {bare}"
+
+    # And the declared type is the one the server sends, spot-checked across the three
+    # shapes: a refusal, a machine-readable document, and a negotiated one.
+    for path, expected in (
+        ("/kv/plans/next/set/hi", "text/plain"),
+        ("/openapi.json", "application/json"),
+        ("/skill.md", "text/plain"),
+    ):
+        served = client.get(path).headers["content-type"].split(";")[0]
+        assert served == expected, f"{path} sends {served}"
+    # …and the negotiated one really does offer the second type it advertises.
+    markdown = client.get("/skill.md", headers={"Accept": "text/markdown"})
+    assert markdown.headers["content-type"].startswith("text/markdown")
+    assert "text/markdown" in doc["paths"]["/skill.md"]["get"]["responses"]["200"]["content"]
+
+
+def test_a_published_ceiling_is_a_number_json_can_carry(client, monkeypatch):
+    """`float()` accepts `inf` and `nan` where the `int()` beside it raises, and this is the
+    one setting whose value is published. A non-finite ceiling reaches /openapi.json and
+    /.well-known/agent.json as the bare token `Infinity` — which Python emits and reads back
+    but RFC 8259 forbids, so every strict parser rejects the whole document. A discovery
+    service answering with undiscoverable documents is worse off than one that refused to
+    boot. Review catch on #40.
+    """
+    import importlib
+    import json as json_module
+
+    import app as app_module
+
+    for bad in ("inf", "-inf", "nan", "NaN"):
+        with pytest.raises(ValueError, match="must be a finite number"):
+            app_module._finite_env("CHAT_MAX_WAIT", bad)
+    # Junk still dies the way every other numeric setting here does.
+    with pytest.raises(ValueError):
+        app_module._finite_env("CHAT_MAX_WAIT", "abc")
+    assert app_module._finite_env("CHAT_MAX_WAIT", "2.5") == 2.5
+
+    # …and the ceiling is actually wired through it. Checking the helper alone would pass
+    # against a MAX_WAIT that still called bare `float()`, which is the mistake this
+    # guards: the process has to refuse to start, not merely own a function that could
+    # have refused.
+    monkeypatch.setenv("CHAT_MAX_WAIT", "inf")
+    for module in ("app", "store"):
+        sys.modules.pop(module, None)
+    with pytest.raises(ValueError, match="must be a finite number"):
+        importlib.import_module("app")
+
+    # Whatever survives that, the documents stay strict JSON — no bare Infinity or NaN.
+    for raw in (client.get("/openapi.json").text, client.get("/.well-known/agent.json").text):
+        assert "Infinity" not in raw and "NaN" not in raw
+        json_module.loads(raw)  # parses under Python's lenient reader too
+
+
+def test_an_integral_ceiling_publishes_as_an_integer(client):
+    """`10.0` and `10` are the same number to a validator and different bytes to a reader,
+    and this was an integer literal until the ceiling became configurable. A fractional
+    ceiling still publishes as a float, because fractional waits are real."""
+    import manifest
+
+    def maximum(doc):
+        return next(
+            p for p in doc["paths"]["/r/{room}"]["get"]["parameters"] if p["name"] == "wait"
+        )["schema"]["maximum"]
+
+    served = maximum(client.get("/openapi.json").json())
+    assert served == 10 and isinstance(served, int)
+    assert maximum(manifest.openapi_document("", "0.7.0", 65536, 2.5)) == 2.5
+    assert manifest.agent_manifest("", "0.7.0", 1, 1, 1, 10.0)["limits"]["long_poll_seconds"] == 10
+
+
 def test_every_status_an_operation_can_return_is_one_it_documents(client):
     """An undocumented status is the failure neither a generated client nor a contract
     fuzzer recovers from: the client treats an unannounced 403 as a transport fault and
