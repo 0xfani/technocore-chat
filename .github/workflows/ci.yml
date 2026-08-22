@@ -13,7 +13,8 @@ on:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.head_ref || github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  # A newer commit makes an older build result obsolete on both PRs and main.
+  cancel-in-progress: true
 
 jobs:
   test:
@@ -24,7 +25,9 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@v7
+      # Full commit pins are the only immutable form for third-party actions. Dependabot
+      # updates these SHAs and the release comments together.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           # Runs PR-controlled code (the service and its tests), so no checkout
           # credentials are persisted where that code could read them.
@@ -32,9 +35,9 @@ jobs:
 
       # Installs the interpreter named in .python-version, so CI, local dev and the
       # image all run the same 3.12.
-      # Pinned to the full version: setup-uv stopped publishing floating major tags
-      # after v7, so `@v10` does not resolve. Dependabot bumps this pin.
-      - uses: astral-sh/setup-uv@v10.0.0
+      # Resolved from the full release version to an immutable commit: setup-uv stopped
+      # publishing floating major tags after v7, and Dependabot bumps this SHA.
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
         with:
           enable-cache: true
       - run: uv sync --frozen
