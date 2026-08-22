@@ -1169,6 +1169,7 @@ contract = [
     { name = "schemathesis" },
 ]
 dev = [
+    { name = "coverage" },
     { name = "httpx2" },
     { name = "hypothesis" },
     { name = "pytest" },
@@ -1189,6 +1190,7 @@ requires-dist = [
 [package.metadata.requires-dev]
 contract = [{ name = "schemathesis", specifier = "==4.25.0" }]
 dev = [
+    { name = "coverage", specifier = ">=7.15.4" },
     { name = "httpx2", specifier = ">=2.10.0" },
     { name = "hypothesis", specifier = ">=6.165.10" },
     { name = "pytest", specifier = ">=9.1.1" },

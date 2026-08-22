@@ -50,8 +50,10 @@ jobs:
       - name: Types
         run: uv run ty check
 
-      - name: Tests
-        run: uv run python -m pytest tests -q
+      - name: Tests + branch coverage
+        run: |
+          uv run coverage run -m pytest tests -q
+          uv run coverage report
 
       # The MCP wrapper is a separate distribution with no dependencies, so nothing else
       # would notice a broken pyproject until someone ran `uv publish`. Its tests are in

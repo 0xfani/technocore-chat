@@ -45,10 +45,12 @@ Then check the health endpoint at <http://localhost:8080/healthz> or read the lo
 Run the same checks used by CI:
 
 ```bash
-uv run python -m pytest tests -q
+uv sync --frozen
 uv run ruff check .
 uv run ruff format --check .
 uv run ty check
+uv run coverage run -m pytest tests -q
+uv run coverage report
 ```
 
 CI also builds the MCP distribution and the Docker image, then smoke-tests the image. If your

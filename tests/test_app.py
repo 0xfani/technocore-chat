@@ -296,6 +296,45 @@ def test_rate_limit_is_actionable_without_headers(client, monkeypatch):
     assert client.get("/r/lobby").status_code == 200  # reads have their own budget
 
 
+def test_every_rate_limited_route_returns_the_same_recovery_plan(client, monkeypatch):
+    """A new route must not accidentally become a free validation/IO oracle, and an agent
+    that only sees the body must get the same useful next step whichever lane it exhausted.
+
+    The first signed-note call is deliberately invalid: signature verification is work an
+    attacker can amplify, so malformed signed traffic has to spend its token before parsing.
+    """
+    import app as app_module
+
+    monkeypatch.setattr(app_module, "RATE_READ", 1)
+    monkeypatch.setattr(app_module, "RATE_WRITE", 1)
+    signed = "/kv/room-owners/d-rate/set-signed/not-a-did/not-a-signature/1/not-a-did"
+    routes = (
+        ("read", "room read", lambda: client.get("/r/rate-tail")),
+        ("read", "note read", lambda: client.get("/kv/rate/missing")),
+        ("read", "note listing", lambda: client.get("/kv/rate")),
+        (
+            "write",
+            "room POST",
+            lambda: client.post("/r/rate-post", json={"from": "bot", "text": "hi"}),
+        ),
+        ("write", "note GET write", lambda: client.get("/kv/rate/get/set/value")),
+        ("write", "signed note write", lambda: client.get(signed)),
+        ("write", "note POST", lambda: client.post("/kv/rate/post", json={"value": "v"})),
+    )
+
+    for kind, label, call_route in routes:
+        app_module._buckets.clear()
+        first = call_route()
+        refused = call_route()
+        assert first.status_code != 429, label
+        assert refused.status_code == 429, label
+        assert f"the {kind} budget" in refused.text, label
+        assert "retry after:" in refused.text, label
+        assert "still open:" in refused.text, label
+        assert "prefer &wait=10 to tight polling" in refused.text, label
+        assert "/.well-known/agent.json" in refused.text, label
+
+
 def test_the_429_names_the_budget_the_manual_deliberately_does_not(client, monkeypatch):
     """The numbers are per deployment, so no document states them as prose. That only works
     if the responses carry them — otherwise removing them from the manual just loses them.
@@ -395,8 +434,11 @@ def test_room_count_is_capped_so_disk_is_bounded(tmp_path, monkeypatch):
     store.append(tmp_path, "room0", "bot", "hi")  # creates room0 AND events -> 2
     store.append(tmp_path, "room1", "bot", "hi")  # -> 3, at the cap
     store.append(tmp_path, "room1", "bot", "still fine")  # existing rooms keep working
-    with pytest.raises(store.StoreError, match="room limit"):
+    with pytest.raises(store.StoreError, match="room limit") as refused:
         store.append(tmp_path, "overflow", "bot", "hi")
+    message = str(refused.value)
+    assert "reuse one you already have" in message and "GET /rooms" in message
+    assert "24 hours" in message and "7 days" in message
 
 
 def test_room_disk_is_capped_independently_of_the_room_count(tmp_path, monkeypatch):
@@ -411,8 +453,11 @@ def test_room_disk_is_capped_independently_of_the_room_count(tmp_path, monkeypat
     monkeypatch.setattr(store, "MAX_ROOMS", 10_000)  # far from binding: bytes must do it
     monkeypatch.setattr(store, "MAX_TOTAL_ROOM_BYTES", 400)
     store.append(tmp_path, "room0", "bot", "x" * 300)  # room0 + events ≈ 452B, over budget
-    with pytest.raises(store.StoreError, match="room storage is full"):
+    with pytest.raises(store.StoreError, match="room storage is full") as refused:
         store.append(tmp_path, "overflow", "bot", "hi")
+    message = str(refused.value)
+    assert "shorter name buys nothing" in message
+    assert "reuse one you already have" in message and "GET /rooms" in message
     # The half that matters as much as the refusal: a room that exists is never cut off,
     # because compaction already holds it under MAX_ROOM_BYTES.
     store.append(tmp_path, "room0", "bot", "still fine")
@@ -717,6 +762,33 @@ def test_rooms_is_cached_but_never_stale_for_a_caller_that_just_wrote(client):
     assert "seq 2" in client.get("/rooms").text
 
 
+def test_rooms_cache_can_be_disabled_and_never_grows_past_its_bound(client, monkeypatch):
+    """The cache is an optimization with two hard operator controls: zero means no reuse,
+    and a flood of distinct `limit` values cannot turn it into attacker-sized process state.
+    """
+    import app as app_module
+
+    real_stats = app_module.store.room_stats
+    calls = []
+
+    def counted(*args, **kwargs):
+        calls.append(kwargs["limit"])
+        return real_stats(*args, **kwargs)
+
+    monkeypatch.setattr(app_module.store, "room_stats", counted)
+    monkeypatch.setattr(app_module, "ROOMS_CACHE_SECONDS", 0)
+    app_module._rooms_cache.clear()
+    client.get("/rooms?limit=7")
+    client.get("/rooms?limit=7")
+    assert calls == [7, 7] and app_module._rooms_cache == {}
+
+    monkeypatch.setattr(app_module, "ROOMS_CACHE_SECONDS", 60)
+    monkeypatch.setattr(app_module, "MAX_ROOMS_CACHE", 2)
+    for limit in (1, 2, 3):
+        client.get(f"/rooms?limit={limit}")
+    assert list(app_module._rooms_cache) == [2, 3]
+
+
 def test_stats_says_whether_per_ip_limits_are_actually_per_ip(client, monkeypatch):
     """Behind a CDN with no CHAT_CLIENT_IP_HEADER every caller shares one bucket, and the
     per-day room budget then bounds the whole world at once. Silent, and indistinguishable
@@ -836,8 +908,11 @@ def test_notes_are_capped_across_namespaces(tmp_path, monkeypatch):
     for i in range(3):
         store.note_set(tmp_path, f"ns{i}", "k", "v")  # a fresh namespace each time
     store.note_set(tmp_path, "ns1", "k", "v2")  # overwriting an existing note still works
-    with pytest.raises(store.StoreError, match="across all namespaces"):
+    with pytest.raises(store.StoreError, match="across all namespaces") as refused:
         store.note_set(tmp_path, "ns-fresh", "k", "v")
+    message = str(refused.value)
+    assert "fresh namespace buys nothing" in message
+    assert "Overwrite a note you already own" in message and "GET /rooms" in message
     assert not (tmp_path / "notes" / "ns-fresh").exists()  # rejection creates no namespace
 
 
@@ -1046,6 +1121,23 @@ def test_no_forwarded_header_is_trusted_by_default(client, monkeypatch):
     monkeypatch.setattr(app_module, "CLIENT_IP_HEADER", "cf-connecting-ip")
     client.get("/r/lobby", headers=spoofed)
     assert ("203.0.113.9", "read") in app_module._buckets
+
+
+def test_an_empty_trusted_proxy_header_falls_back_to_the_socket_peer(client, monkeypatch):
+    """A missing/blank edge header must not collapse callers into an empty-string bucket.
+
+    This also refuses the tempting but unsafe fallback to a later comma-separated value:
+    the configured proxy owns the first hop, while anything after it may be caller input.
+    """
+    import app as app_module
+
+    monkeypatch.setattr(app_module, "CLIENT_IP_HEADER", "cf-connecting-ip")
+    app_module._buckets.clear()
+    client.get("/r/lobby", headers={"cf-connecting-ip": " , 198.51.100.7"})
+
+    identities = {ip for ip, kind in app_module._buckets if kind == "read"}
+    assert identities == {"testclient"}
+    assert "" not in identities and "198.51.100.7" not in identities
 
 
 def _dockerfile_cmd() -> list[str]:
@@ -1844,6 +1936,41 @@ def test_oversize_body_is_refused_before_it_is_buffered(client):
     assert "no rooms yet" in client.get("/rooms").text  # nothing was written
 
 
+def test_chunked_body_is_stopped_at_the_same_cap_and_says_how_to_split_it(client):
+    """Content-Length is optional, so the streaming path is the actual memory-safety bound
+    against a chunked upload. Its body must also give a usable correction without headers.
+    """
+    import asyncio
+
+    from starlette.requests import Request
+    from starlette.responses import Response
+
+    import app as app_module
+
+    chunks = iter((b"x" * app_module.MAX_BODY, b"y"))
+
+    async def receive():
+        chunk = next(chunks)
+        return {"type": "http.request", "body": chunk, "more_body": chunk.endswith(b"x")}
+
+    request = Request(
+        {
+            "type": "http",
+            "method": "POST",
+            "path": "/r/lobby",
+            "headers": [],
+            "client": ("203.0.113.8", 1234),
+        },
+        receive,
+    )
+    response = asyncio.run(app_module.read_json(request))
+    assert isinstance(response, Response)
+    assert response.status_code == 413
+    body = bytes(response.body).decode()
+    assert "the stream passed it before it ended" in body
+    assert "multiple room lines" in body and "multiple keys" in body
+
+
 def test_malformed_payload_shapes_are_400_not_500(client):
     for body in ("[1,2,3]", '"a string"', "42", "null", "true"):
         r = client.post(
@@ -1852,6 +1979,16 @@ def test_malformed_payload_shapes_are_400_not_500(client):
         assert r.status_code == 400, body
     assert client.post("/r/lobby", content=b"{not json").status_code == 400
     assert client.post("/r/lobby", json={}).status_code == 400  # empty from/text
+
+
+def test_a_malformed_note_post_names_the_note_shape_to_send_next(client):
+    """The shared body parser mentions both POST envelopes. Exercise it through the note
+    route too so future room-focused wording cannot leave note clients without a correction.
+    """
+    response = client.post("/kv/plans/next", content=b"value=ship")
+    assert response.status_code == 400
+    assert '{"value":"..."}' in response.text
+    assert "body must be JSON" in response.text
 
 
 def test_numeric_inputs_cannot_overflow_or_amplify(client, tmp_path):
@@ -2047,6 +2184,63 @@ def test_waiter_slots_are_bounded_per_ip(client):
                 assert other is True  # a different IP is unaffected
     assert app._waiters_total == 0  # every slot released
     assert app._waiters_by_ip == {}  # and the table does not grow per distinct IP
+
+
+def test_long_poll_surfaces_a_message_that_arrives_after_the_request(client, monkeypatch):
+    """This is the behavior long-polling exists for; a timeout-only test never exercises
+    the wake-up path and would miss a refactor that silently turned every wait into polling.
+    """
+    from concurrent.futures import ThreadPoolExecutor
+
+    import app as app_module
+
+    client.get("/r/lobby/say/bot/first")
+    monkeypatch.setattr(app_module, "WAIT_POLL", 0.01)
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        waiting = pool.submit(client.get, "/r/lobby?since=1&wait=2&format=json")
+        deadline = time.monotonic() + 1
+        while app_module._waiters_total == 0 and time.monotonic() < deadline:
+            time.sleep(0.005)
+        assert app_module._waiters_total == 1, "the read never acquired a bounded waiter slot"
+        client.get("/r/lobby/say/bot/second")
+        response = waiting.result(timeout=2)
+
+    assert [message["text"] for message in response.json()["messages"]] == ["second"]
+    assert app_module._waiters_total == 0 and app_module._waiters_by_ip == {}
+
+
+def test_long_poll_refuses_excess_slots_immediately_and_releases_disconnects(client, monkeypatch):
+    """Both exits are resource-safety paths: an attacker gets no unbounded parked sockets,
+    and a caller that vanished stops causing tail reads before its timeout expires.
+    """
+    import asyncio
+    from types import SimpleNamespace
+    from typing import cast
+
+    from starlette.requests import Request
+
+    import app as app_module
+
+    client.get("/r/lobby/say/bot/first")
+    monkeypatch.setattr(app_module, "MAX_WAITERS_TOTAL", 0)
+    started = time.monotonic()
+    refused = client.get("/r/lobby?since=1&wait=10&format=json")
+    assert time.monotonic() - started < 1
+    assert refused.json()["messages"] == []
+
+    monkeypatch.setattr(app_module, "MAX_WAITERS_TOTAL", 64)
+    monkeypatch.setattr(app_module, "WAIT_POLL", 0)
+
+    class Gone:
+        headers = {}
+        client = SimpleNamespace(host="203.0.113.7")
+
+        async def is_disconnected(self):
+            return True
+
+    result = asyncio.run(app_module._await_messages(cast(Request, Gone()), "lobby", 50, 1, 10))
+    assert result is None
+    assert app_module._waiters_total == 0 and app_module._waiters_by_ip == {}
 
 
 # ------------------------------------------------------------- record format / stats
@@ -2367,6 +2561,19 @@ def test_signed_post_rejects_padding_and_replays_without_appending(client):
     assert _post_signed(client, "lobby", did, sign, "older", nonce=6).status_code == 400
     assert _post_signed(client, "lobby", did, sign, "next", nonce=8).status_code == 200
     assert client.get("/r/lobby?format=json").json()["count"] == 2
+
+
+def test_a_did_with_a_non_base58_character_fails_closed_and_names_the_encoding(client):
+    """Prefix and length checks are not enough: characters such as 0/O/I/l are outside
+    base58btc. A malformed identity must never fall back to the unsigned lane.
+    """
+    did, sign = _keypair()
+    malformed = did[:-1] + "0"
+    signature = sign("lobby|1|hello")
+    response = client.get(f"/r/lobby/say-signed/{malformed}/{signature}/1/hello")
+    assert response.status_code == 400
+    assert "not base58btc" in response.text
+    assert client.get("/r/lobby?format=json").json()["count"] == 0
 
 
 def test_signed_post_covers_the_swept_text_not_the_raw_text(client):
@@ -2846,15 +3053,50 @@ def test_ephemeral_expiry_is_lazy_but_rotation_reclaims_the_disk(tmp_path, monke
     assert store.room_path(tmp_path, "e-chat").stat().st_size <= 4096
 
 
-def test_an_unparseable_timestamp_counts_as_expired(tmp_path):
-    """Fail closed: a record whose age cannot be established cannot honour the promise."""
+@pytest.mark.parametrize("stamp", ["whenever", None, 0, {}, []])
+def test_an_unparseable_timestamp_counts_as_expired(tmp_path, stamp):
+    """Fail closed for malformed JSON types as well as malformed timestamp strings.
+
+    The room file is persistent attacker-controlled input after any volume restore or manual
+    repair; accepting a non-string here would silently violate the advertised deletion age.
+    """
     import store
 
     room = store.room_path(tmp_path, "e-x")
     room.parent.mkdir(parents=True, exist_ok=True)
-    room.write_text('{"seq":1,"ts":"whenever","from":"bot","text":"hi"}\n')
+    room.write_text(json.dumps({"seq": 1, "ts": stamp, "from": "bot", "text": "hi"}) + "\n")
     assert store.read_messages(tmp_path, "e-x")["count"] == 0
     assert store.read_messages(tmp_path, "keeps-it")["count"] == 0  # a different room, empty
+
+
+def test_ephemeral_ttl_boundary_is_inclusive_then_expires(tmp_path, monkeypatch):
+    """At exactly TTL the record is still within the promise; one microsecond older is not.
+
+    The paired timestamps lock the retention contract to its comparison boundary: a timestamp
+    equal to the cutoff is retained, while the immediately preceding microsecond is expired.
+    """
+    from datetime import UTC, datetime
+
+    import store
+
+    now = 2_000_000_000.0
+    cutoff = now - store.EPHEMERAL_TTL_SECONDS
+
+    def stamp(epoch: float) -> str:
+        return datetime.fromtimestamp(epoch, UTC).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+
+    room = store.room_path(tmp_path, "e-boundary")
+    room.parent.mkdir(parents=True, exist_ok=True)
+    records = (
+        {"seq": 1, "ts": stamp(cutoff - 0.000001), "from": "bot", "text": "expired"},
+        {"seq": 2, "ts": stamp(cutoff), "from": "bot", "text": "exact"},
+    )
+    room.write_text("".join(json.dumps(record) + "\n" for record in records))
+    monkeypatch.setattr(store.time, "time", lambda: now)
+
+    view = store.read_messages(tmp_path, "e-boundary")
+    assert [message["text"] for message in view["messages"]] == ["exact"]
+    assert view["first_seq"] == 2 and view["last_seq"] == 2
 
 
 def test_ephemeral_and_private_compose(client, monkeypatch):
@@ -2870,6 +3112,27 @@ def test_ephemeral_and_private_compose(client, monkeypatch):
     assert "stale" not in client.get("/r/e-p-7f3a9c").text
     assert "e-p-7f3a9c" not in client.get("/rooms").text  # unlisted, and never announced
     assert "e-p-7f3a9c" not in client.get("/r/events").text
+
+
+def test_ephemeral_mailbox_keeps_authentication_while_expiring_messages(client, monkeypatch):
+    """Room classes are orthogonal primitives: `mb-e-` must require attribution without
+    accidentally making old mail durable or removing the open read lane.
+    """
+    import store
+
+    did, sign = _keypair()
+    real_now = store._now
+    _at(monkeypatch, store, "2020-01-01T00:00:00.000000Z")
+    assert _say_signed(client, "mb-e-inbox", did, sign, "stale", nonce=1).status_code == 200
+    monkeypatch.setattr(store, "_now", real_now)
+    assert _say_signed(client, "mb-e-inbox", did, sign, "fresh", nonce=2).status_code == 200
+
+    unsigned = client.get("/r/mb-e-inbox/say/spammer/replay")
+    assert unsigned.status_code == 403
+    assert "say-signed" in unsigned.text and "/llms.txt" in unsigned.text
+    view = client.get("/r/mb-e-inbox?format=json").json()
+    assert [message["text"] for message in view["messages"]] == ["fresh"]
+    assert view["messages"][0]["from"] == did
 
 
 # ------------------------------------------------------------------ /skill.md alias
@@ -3331,6 +3594,22 @@ def test_snapshots_survive_a_torn_line(tmp_path, monkeypatch):
     assert len(store.snapshots(tmp_path)) == 1
 
 
+def test_corrupt_aggregate_metadata_is_ignored_without_inventing_usage(tmp_path):
+    """Counters and snapshots are diagnostics, never authority. A corrupt sidecar must not
+    take down writes or be interpreted as a huge/negative value that changes enforcement.
+    """
+    import store
+
+    (tmp_path / store.COUNTERS_FILE).write_text("[]")
+    assert store.counters(tmp_path) == dict.fromkeys(store.COUNTER_KEYS, 0)
+
+    samples = tmp_path / store.SNAPSHOTS_FILE
+    samples.write_text(
+        "\n".join((json.dumps({"t": "yesterday"}), json.dumps([1, 2]), json.dumps({"t": 7})))
+    )
+    assert store.snapshots(tmp_path) == [{"t": 7}]
+
+
 def test_stats_serves_the_stored_history_with_the_current_values(stats_client, monkeypatch):
     """One fetch answers both "now" and "how did we get here", so the caller keeps no ring
     of its own and a redeploy of it costs no history."""
@@ -3345,6 +3624,29 @@ def test_stats_serves_the_stored_history_with_the_current_values(stats_client, m
     assert view["counters"]["messages"] == 2  # current, computed live
     # …and the history is the store's file, not a second copy built in the handler.
     assert store.snapshots(Path(os.environ["CHAT_ROOT"])) == view["history"]
+
+
+def test_stats_cache_avoids_repeating_the_expensive_store_walk(stats_client, monkeypatch):
+    """The token is not a cost bound: a leaked token can be replayed, so the O(capacity)
+    stats walk still needs the short cache promised by the handler.
+    """
+    import app as app_module
+
+    real_view = app_module._stats_view
+    calls = []
+
+    def counted():
+        calls.append(1)
+        return real_view()
+
+    monkeypatch.setattr(app_module, "STATS_CACHE_SECONDS", 60)
+    monkeypatch.setattr(app_module, "_stats_view", counted)
+    app_module._stats_cache = (0.0, {})
+    headers = {"X-Stats-Token": "s3cret"}
+    first = stats_client.get("/stats", headers=headers)
+    second = stats_client.get("/stats", headers=headers)
+    assert first.status_code == second.status_code == 200
+    assert calls == [1]
 
 
 # ---------------------------------------------------------------- errors an agent can act on
@@ -3995,6 +4297,17 @@ def test_markdown_negotiation_reads_q_values_not_header_order(client):
     # `*/*` names no preference between two labels of the same bytes, so the plain
     # default stands — it is what curl and most agents send.
     assert label("*/*").startswith("text/plain")
+
+
+def test_malformed_accept_quality_fails_closed_to_plain_text(client):
+    """Accept is attacker-controlled. An unreadable q-value must not crash negotiation or
+    opt the caller into a representation it did not validly request.
+    """
+    response = client.get(
+        "/skill.md", headers={"accept": "text/markdown;q=definitely, text/plain;q=1"}
+    )
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("text/plain")
 
 
 def test_sitemap_refuses_to_guess_an_origin_it_does_not_know(client):

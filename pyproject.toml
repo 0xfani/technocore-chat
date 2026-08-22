@@ -17,6 +17,7 @@ dependencies = [
 # no longer carries a second copy that can drift out of step with this file.
 [dependency-groups]
 dev = [
+    "coverage>=7.15.4",
     "pytest>=9.1.1",
     "httpx2>=2.10.0",
     "ruff>=0.16.1",
@@ -60,6 +61,18 @@ extra-paths = ["./src", "./mcp/src"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+
+[tool.coverage.run]
+branch = true
+source = ["src", "mcp/src"]
+
+[tool.coverage.report]
+# Combined statement + branch coverage. A branch-aware floor keeps a PR from improving the
+# headline merely by executing happy-path lines while every refusal/recovery edge stays dark.
+fail_under = 96
+precision = 2
+show_missing = true
+skip_covered = true
 
 # Mutation testing, on a schedule rather than per pull request. Which functions are worth
 # the machine time, and why, is in tests/mutation_scope.py; this is only its plumbing.
