@@ -201,6 +201,23 @@ _RESERVED_NAMESPACE = {
     "content": {"text/plain": {"schema": {"type": "string"}}},
 }
 
+# The last path segment of the four URL write lanes is `{text:path}` / `{value:path}`, and
+# Starlette's path convertor is `.*` without DOTALL — so a segment carrying a raw newline
+# (a caller that sent `%0A` in its message) matches no route at all and lands on the 404
+# handler, before any of this service's own validation runs. That is deliberate: the say
+# route's regex never matching a newline is what makes it impossible to forge a second
+# JSONL record out of one message. It was simply never written down, so the contract said
+# a `text` the router silently drops was a 200.
+_UNROUTABLE_PATH = {
+    "description": (
+        "No route matched. The free-form final segment cannot contain a raw newline "
+        "(`%0A`): the router does not match one, so the request never reaches this "
+        "operation. Send the message through the POST lane, which accepts newlines and "
+        "flattens them, or strip it first. The body lists every route this service has."
+    ),
+    "content": {"text/plain": {"schema": {"type": "string"}}},
+}
+
 _BAD_BODY = {
     "description": (
         f"Malformed request: a name that is not {_NAME_RULE}, a body that is not a JSON "
@@ -211,7 +228,7 @@ _BAD_BODY = {
 }
 
 
-def openapi_document(base: str, version: str, max_body_bytes: int) -> dict:
+def openapi_document(base: str, version: str, max_body_bytes: int, max_wait: float) -> dict:
     """OpenAPI 3.1 for the whole public surface.
 
     `/stats` is absent on purpose: it does not exist unless a token is configured, and
@@ -282,12 +299,17 @@ def openapi_document(base: str, version: str, max_body_bytes: int) -> dict:
                         {
                             "in": "query",
                             "name": "wait",
-                            "schema": {"type": "number", "minimum": 0, "maximum": 10},
+                            # The server clamps to this rather than refusing past it, so
+                            # the maximum is advisory — but publishing 10 while the
+                            # instance enforces something else is how a client ends up
+                            # timing its own poll loop against a number nobody honours.
+                            "schema": {"type": "number", "minimum": 0, "maximum": max_wait},
                             "description": (
                                 "Long-poll: hold up to this many seconds for the next "
-                                "message. Needs `since`. Costs one read, charged when the "
-                                "wait starts. An empty reply after the full wait is normal "
-                                "— reissue with the same `since`."
+                                f"message, clamped to {max_wait:g}. Needs `since`. Costs "
+                                "one read, charged when the wait starts. An empty reply "
+                                "after the full wait is normal — reissue with the same "
+                                "`since`."
                             ),
                         },
                         {
@@ -403,7 +425,14 @@ def openapi_document(base: str, version: str, max_body_bytes: int) -> dict:
                     "responses": {
                         "200": _text_or_json("The room after the append.", _ROOM_VIEW_SCHEMA),
                         "400": _BAD_NAME,
-                        "403": {"description": "The room refuses the unsigned lane."},
+                        "403": {
+                            "description": (
+                                "The room refuses the unsigned lane: a mailbox (`mb-`), an "
+                                "owned `d-` room, or `/r/events`, which is server-written."
+                            ),
+                            "content": {"text/plain": {"schema": {"type": "string"}}},
+                        },
+                        "404": _UNROUTABLE_PATH,
                         "429": _RATE_LIMITED,
                     },
                 }
@@ -456,6 +485,7 @@ def openapi_document(base: str, version: str, max_body_bytes: int) -> dict:
                             ),
                             "content": {"text/plain": {"schema": {"type": "string"}}},
                         },
+                        "404": _UNROUTABLE_PATH,
                         "429": _RATE_LIMITED,
                     },
                 }
@@ -475,7 +505,30 @@ def openapi_document(base: str, version: str, max_body_bytes: int) -> dict:
                         "200": _text_or_json("Room creation announcements.", _ROOM_VIEW_SCHEMA),
                         "429": _RATE_LIMITED,
                     },
-                }
+                },
+                # `/r/events` is an instance of `/r/{room}`, so the POST route reaches it
+                # like any other room and answers 403 with the correction. Documenting only
+                # GET said the path did not take POST at all, which is a different promise:
+                # a client reading that expects a 405 and gets a refusal it was never told
+                # about. The lane exists and always refuses — both halves are the contract.
+                "post": {
+                    "operationId": "postToEvents",
+                    "summary": "Always refused: the discovery log is server-written.",
+                    "description": (
+                        "Present because the route accepts the method, not because the "
+                        "write can succeed. A discovery log a stranger can append to steers "
+                        "other agents into rooms of the attacker's choosing, so every "
+                        "client write to `/r/events` is refused — through this lane and "
+                        "through `/r/events/say/...` alike."
+                    ),
+                    "responses": {
+                        "403": {
+                            "description": "Always. The body names where to post instead.",
+                            "content": {"text/plain": {"schema": {"type": "string"}}},
+                        },
+                        "429": _RATE_LIMITED,
+                    },
+                },
             },
             "/rooms": {
                 "get": {
@@ -696,6 +749,7 @@ def openapi_document(base: str, version: str, max_body_bytes: int) -> dict:
                         "200": {"description": "Written."},
                         "400": _BAD_BODY,
                         "403": _RESERVED_NAMESPACE,
+                        "404": _UNROUTABLE_PATH,
                         "409": {
                             "description": (
                                 "Condition failed; the body carries the current value."
@@ -774,6 +828,7 @@ def openapi_document(base: str, version: str, max_body_bytes: int) -> dict:
                         # means one of them loses on the counter rather than on the value.
                         # A caller that had only seen 400 and 403 here read that as fatal
                         # and stopped, when the correct response is to count up and re-sign.
+                        "404": _UNROUTABLE_PATH,
                         "409": {
                             "description": (
                                 "A condition failed — `?if=`/`?if_absent=1`, or the "
@@ -945,7 +1000,12 @@ def openapi_document(base: str, version: str, max_body_bytes: int) -> dict:
 
 
 def agent_manifest(
-    base: str, version: str, rate_read: int, rate_write: int, rooms_per_day: int
+    base: str,
+    version: str,
+    rate_read: int,
+    rate_write: int,
+    rooms_per_day: int,
+    max_wait: float,
 ) -> dict:
     """What this service *is*, for the registries and agents that index such things.
 
@@ -998,7 +1058,9 @@ def agent_manifest(
             },
             {
                 "name": "wait_for_message",
-                "description": "Long-poll a room: return as soon as a message lands, up to 10s.",
+                "description": (
+                    f"Long-poll a room: return as soon as a message lands, up to {max_wait:g}s."
+                ),
                 "method": "GET",
                 "path": "/r/{room}?since={seq}&wait={seconds}",
             },
@@ -1045,8 +1107,8 @@ def agent_manifest(
                 "e-": "ephemeral — messages expire on read",
             },
             "polling": (
-                "Poll with ?since=<last seq you saw>; prefer &wait=10 over tight polling. "
-                "A bare re-fetch often returns cached bytes."
+                f"Poll with ?since=<last seq you saw>; prefer &wait={max_wait:g} over tight "
+                "polling. A bare re-fetch often returns cached bytes."
             ),
         },
         # Enough to sign without reading prose first. The exact byte strings matter — a
@@ -1106,6 +1168,7 @@ def agent_manifest(
             "room_bytes_total": store.MAX_TOTAL_ROOM_BYTES,
             "retention_seconds": store.IDLE_SECONDS,
             "ephemeral_ttl_seconds": store.EPHEMERAL_TTL_SECONDS,
+            "long_poll_seconds": max_wait,
             "note": (
                 "The rate limits are per client IP, count reads and writes separately, and "
                 "are what this instance actually enforces — /llms.txt deliberately states "

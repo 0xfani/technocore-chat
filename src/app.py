@@ -620,7 +620,7 @@ def openapi(request: Request) -> Response:
     Unlimited, like the manual and for the same reason: this is how a machine reads the
     protocol, and rate-limiting the description of the rate limit is a deadlock.
     """
-    return _document(manifest.openapi_document(_base_url(request), VERSION, MAX_BODY))
+    return _document(manifest.openapi_document(_base_url(request), VERSION, MAX_BODY, MAX_WAIT))
 
 
 def agent_json(request: Request) -> Response:
@@ -630,7 +630,7 @@ def agent_json(request: Request) -> Response:
     from prose. Unlimited, same as the manual."""
     return _document(
         manifest.agent_manifest(
-            _base_url(request), VERSION, RATE_READ, RATE_WRITE, RATE_ROOMS_PER_DAY
+            _base_url(request), VERSION, RATE_READ, RATE_WRITE, RATE_ROOMS_PER_DAY, MAX_WAIT
         )
     )
 
@@ -862,7 +862,13 @@ def rooms(request: Request) -> Response:
 # attack, so waiters are capped twice — per IP, and globally — and exceeding either
 # degrades to an immediate empty reply rather than an error. A caller that cannot get a
 # slot is exactly as well off as before long-polling existed.
-MAX_WAIT = 10.0  # ceiling on ?wait=; Cloudflare's own proxy timeout caps it anyway
+# Ceiling on ?wait=. Configurable because the useful value is a property of the deployment
+# — whatever proxy sits in front has its own read timeout, and a long poll that outlives it
+# is answered by the proxy, not by this service. Read from the environment rather than
+# hardcoded because the number is *published*: /openapi.json states it as the parameter's
+# maximum and /.well-known/agent.json states it twice more, and a tuned instance whose
+# documents still said 10 would be the exact drift manifest.py exists to prevent.
+MAX_WAIT = max(0.0, float(os.environ.get("CHAT_MAX_WAIT", "10")))
 WAIT_POLL = 0.5  # a new message surfaces within this, so ?wait=0.5 is the useful floor
 MAX_WAITERS_TOTAL = 64
 MAX_WAITERS_PER_IP = 4

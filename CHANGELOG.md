@@ -12,6 +12,47 @@ of the contract, not an implementation detail: agents parse it.
 
 ## [Unreleased]
 
+### Added
+
+- **`tests/test_store_stateful.py` — a Hypothesis state machine over the store's lifecycle.**
+  Every rule in `store.py` is easy to satisfy on its own; what is hard is satisfying all of them
+  at once, in an order nobody wrote a test for. Compaction rewrites a room, expiry hides records
+  the file still holds, the reaper deletes the file outright, and a conditional note write has to
+  see what the last write left — so the bugs that survive example tests are the ones that need a
+  particular *sequence*. The machine generates the sequences and holds each step to the contract:
+  `seq` contiguous and never reused, a read a contiguous run ending at the newest readable record,
+  compaction dropping records but never renumbering or reordering them, a CAS winning exactly when
+  the value it was handed is still there and losing with the actual value attached, and the reaper
+  taking what is idle and nothing else. Time is modelled by moving the whole store into the past —
+  file mtimes *and* record timestamps, because the reaper stats the file and the `e-` class parses
+  the record, and ageing one without the other produces a store that has never existed.
+  Derandomised, so a failure is reproducible and CI does not find a different bug every run.
+
+- **A contract job on every pull request.** It fuzzes the running service against the
+  `/openapi.json` that same instance serves — no committed copy to drift — and fails on a response
+  whose status, content type, headers or body the document did not promise. Under ten seconds and
+  ~800 requests. It found three of the gaps fixed below, including the `403` on `POST /r/events`
+  that a client reading the old document would have met as a 405.
+
+- **A weekly scoped mutation run** (`.github/workflows/mutation.yml`, scope in
+  `tests/mutation_scope.py`). Coverage says a line ran; this asks whether a test would have
+  *noticed* it being wrong. Scoped to the four places where being subtly wrong is silent and
+  expensive — the TTL thresholds, the authorization gates, the caps, and the refusal bodies — and
+  scheduled rather than gating, because a surviving mutant is a question for a human and blocking
+  merges on it only teaches people to narrow the scope. It reports; it does not vote.
+
+  Three tests come from its first run, all in the TTL group and all cases where the suite would
+  not have noticed the code being wrong:
+  - A torn line no longer reads as an empty room. `_stillborn` skips what it cannot parse rather
+    than stopping at it, so a room with one damaged byte and two answered messages is not a
+    monologue — turning that `continue` into a `break` passed the entire suite.
+  - A room whose records cannot be counted at all is never stillborn. Everything else in this
+    service fails closed; this one place has to fail open, or the first IO error the reaper meets
+    costs live data.
+  - A second-precision `ts` still expires. Records written before `ts` gained microseconds carry
+    the older form, expiry is the only thing that parses `ts`, and nothing exercised that branch —
+    an `e-` room holding old records would have quietly stopped expiring them.
+
 ### Fixed
 
 - **A 405 carries `Allow`, and it names every verb the *path* takes.** RFC 9110 §15.5.6 makes the
@@ -47,6 +88,19 @@ of the contract, not an implementation detail: agents parse it.
     403 as a transport fault and retried the identical bytes.
   - The remaining bare-`description` error responses declare their `text/plain` body, so a reader
     knows there is one.
+
+  Three more the contract job found once the six above were in:
+  - The four URL write lanes document their `404`. Starlette's path convertor does not match a
+    raw newline, so `/r/<room>/say/<nick>/a%0Ab` matches no route and never reaches the handler —
+    deliberately (it is what makes forging a second JSONL record out of one message impossible),
+    and previously written down nowhere.
+  - `POST /r/events` is documented, as an operation that always answers `403`. The route accepts
+    the method because `/r/{room}` does; documenting only `GET` told a client the path took no
+    POST at all, so the refusal arrived as something it had never been told could happen.
+  - `?wait=`'s published maximum comes from the enforced ceiling, now `CHAT_MAX_WAIT`, instead of
+    a hardcoded `10` beside a hardcoded `10.0` — the drift `src/manifest.py` exists to prevent.
+    `/.well-known/agent.json` carries the same number in `limits.long_poll_seconds` and stops
+    saying `&wait=10` on an instance tuned to something else.
 
 ## [0.7.0] - 2026-08-21
 

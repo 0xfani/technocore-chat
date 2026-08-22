@@ -21,6 +21,24 @@ dev = [
     "httpx2>=2.10.0",
     "ruff>=0.16.1",
     "ty>=0.0.71",
+    # The store's lifecycle rules only conflict in *sequences* — compaction, expiry, the
+    # reaper and a conditional write all touching one room in an order nobody wrote a test
+    # for. tests/test_store_stateful.py generates those orderings.
+    "hypothesis>=6.165.10",
+]
+
+# Its own group, not `dev`: it is one job's tool, it pulls in eighteen packages, and
+# nothing else in the suite imports it. `uv sync --frozen` for day-to-day work stays as
+# small as it was. Pinned exactly rather than floored, because the job's whole claim is
+# that a failure is a change in this service and not in the generator that found it.
+contract = [
+    "schemathesis==4.25.0",
+]
+
+# Same reasoning, and it never runs on a pull request at all — see
+# .github/workflows/mutation.yml and tests/mutation_scope.py.
+mutation = [
+    "mutmut==3.7.0",
 ]
 
 [tool.ruff]
@@ -44,6 +62,22 @@ extra-paths = ["./src", "./mcp/src"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+
+# Mutation testing, run on a schedule rather than per pull request. The scope — which
+# functions are worth the machine time, and why — is in tests/mutation_scope.py; this is
+# only the plumbing it needs.
+[tool.mutmut]
+source_paths = ["src"]
+# humans.html is the only other thing in src/ and it is not Python.
+only_mutate = ["src/app.py", "src/store.py", "src/didkey.py"]
+# mutmut runs the suite inside a copy of the project, so anything the tests read from the
+# repo root has to be copied in too — the version they cross-check lives in three files,
+# the Dockerfile is asserted against, and app.py reads SKILL.md at import.
+also_copy = ["SKILL.md", "docker", "mcp"]
+# test_mcp.py is excluded, not forgotten: nothing in scope is reachable through the MCP
+# wrapper that is not already reachable through the HTTP tests, and it is time paid once
+# per mutant.
+pytest_add_cli_args_test_selection = ["tests/test_app.py", "tests/test_store_stateful.py"]
 
 # Not an installable package: src/ is copied into the image and imported by path.
 # Without this, uv tries to build a wheel and fails.

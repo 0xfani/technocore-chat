@@ -817,6 +817,64 @@ def test_stillborn_rule_does_not_touch_notes(tmp_path):
     assert path.exists()
 
 
+def test_a_torn_line_does_not_make_a_busy_room_look_stillborn(tmp_path):
+    """The stillborn count skips what it cannot parse rather than stopping at it. Stopping
+    would read a room with one bad line as a room with no messages, and the reaper would
+    take a conversation because of a byte a crash left behind. Found by the mutation run:
+    turning that `continue` into a `break` passed the whole suite."""
+    import store
+
+    path = store.room_path(tmp_path, "torn")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(
+        b'{"seq":1,"ts":"2026-01-01T00:00:00.000000Z","from":"a","tex\n'  # cut mid-record
+        b'{"seq":2,"ts":"2026-01-01T00:00:01.000000Z","from":"a","text":"anyone here?"}\n'
+        b'{"seq":3,"ts":"2026-01-01T00:00:02.000000Z","from":"b","text":"yes"}\n'
+    )
+    day_old = time.time() - store.STILLBORN_SECONDS - 60
+    os.utime(path, (day_old, day_old))
+    (tmp_path / ".reaped").unlink(missing_ok=True)
+    store._reap(tmp_path)
+
+    assert path.exists(), "two answered messages and a torn line is not a monologue"
+    # …and the messages either side of the torn line are still readable.
+    assert store.read_messages(tmp_path, "torn")["count"] == 2
+
+
+def test_a_room_that_cannot_be_counted_is_never_stillborn(tmp_path):
+    """Fail open, and only here. Everything else in this service fails closed, but a
+    reaper that treats "I could not read this" as "there is nothing here" deletes live
+    data on the first IO error it meets."""
+    import store
+
+    unreadable = tmp_path / "rooms"  # a directory: opening it raises, like a bad file
+    unreadable.mkdir()
+    assert store._stillborn(unreadable) is False
+
+
+def test_a_second_precision_timestamp_still_expires(tmp_path):
+    """Records written before `ts` gained microseconds carry `...:05Z`, and `e-` expiry is
+    the one thing that parses `ts` at all — so the older form has to keep working or an
+    ephemeral room silently stops expiring the oldest records it holds. Both forms coexist
+    by design; this is what keeps the second one real."""
+    from datetime import UTC, datetime, timedelta
+
+    import store
+
+    path = store.room_path(tmp_path, "e-legacy")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    stale = datetime.now(UTC) - timedelta(seconds=store.EPHEMERAL_TTL_SECONDS + 60)
+    fresh = datetime.now(UTC) - timedelta(seconds=5)
+    path.write_bytes(
+        f'{{"seq":1,"ts":"{stale.strftime("%Y-%m-%dT%H:%M:%SZ")}","from":"a","text":"old"}}\n'
+        f'{{"seq":2,"ts":"{fresh.strftime("%Y-%m-%dT%H:%M:%SZ")}","from":"a","text":"new"}}\n'.encode()
+    )
+    view = store.read_messages(tmp_path, "e-legacy")
+    assert [m["text"] for m in view["messages"]] == ["new"]
+    # seq keeps advancing past what nobody can read any more, or a cursor would be reused.
+    assert store.last_seq(tmp_path, "e-legacy") == 2
+
+
 def test_reap_spares_a_stillborn_room_answered_after_the_count(tmp_path, monkeypatch):
     """The under-lock recheck must re-count, not just re-stat: a reply landing mid-pass is
     exactly the message the reaper would otherwise delete."""
@@ -3046,12 +3104,23 @@ def test_the_spec_and_the_running_app_describe_the_same_service(client):
         assert set(operations) <= accepted, f"{path} documents a method it does not accept"
 
     # 3. Every operation is actually usable by a reader: identified, summarised, and with
-    #    at least the success case described.
+    #    the outcome a caller will actually get described.
     operations = [op for path in doc["paths"].values() for op in path.values()]
     ids = [op["operationId"] for op in operations]
     assert len(ids) == len(set(ids)), "operationIds must be unique — clients name methods with them"
     for op in operations:
-        assert op["summary"] and "200" in op["responses"]
+        assert op["summary"], op
+        codes = set(op["responses"])
+        # Normally that outcome is the success case. The one exception is a lane that
+        # exists only to refuse: `/r/events` accepts POST because `/r/{room}` does, and
+        # answers 403 every time. A documented 200 there would be the lie — and documenting
+        # nothing at all is what left a client expecting 405 and reading the 403 as a fault.
+        # It has to say so in prose, or "no 2xx" is indistinguishable from an oversight.
+        if not any(code.startswith("2") for code in codes):
+            assert "403" in codes, f"{op['operationId']} documents no outcome at all"
+            assert "refus" in (op["summary"] + op.get("description", "")).lower(), (
+                f"{op['operationId']} can never succeed and does not say why"
+            )
 
 
 def test_every_status_an_operation_can_return_is_one_it_documents(client):
