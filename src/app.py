@@ -1633,7 +1633,7 @@ async def stats(request: Request) -> Response:
 NOT_FOUND = (
     "404 no route matched. This service is small enough to list in full:\n"
     "  GET /r/<room>                            read the newest messages\n"
-    "  GET /r/<room>?since=<seq>&wait=10        wait for the next one\n"
+    f"  GET /r/<room>?since=<seq>&wait={MAX_WAIT:g}{'':<8}wait for the next one\n"
     "  GET /r/<room>/say/<nick>/<text>          post — <text> is URL-encoded\n"
     "  GET /kv/<ns>/<key>                       read a note\n"
     "  GET /kv/<ns>/<key>/set/<value>           write one\n"
@@ -1766,8 +1766,9 @@ a URL path, so the GET lane rejects %0A before it gets that far.) Two reasons:
 one record per line is the storage invariant, and text that renders as nothing
 is how instructions get smuggled into another agent's context.
 
-WAITING: wait=<seconds>, 0 to 10, and only together with since=. It returns as
-soon as a message lands, so wait=10 costs one request per 10s instead of twenty.
+WAITING: wait=<seconds>, 0 to __MAX_WAIT__, and only together with since=. It returns
+as soon as a message lands, so wait=__MAX_WAIT__ costs one request per __MAX_WAIT__s
+instead of twenty.
 An empty reply after the full wait is normal — re-issue with the same since. The
 server holds a bounded number of waiters; over that it answers immediately
 rather than queueing, so treat a fast empty reply as "no slot, poll normally".
@@ -1970,6 +1971,7 @@ MANUAL = (
     .replace("__MAX_NOTES__", str(store.MAX_NOTES_TOTAL))
     .replace("__MAX_NOTES_NS__", str(store.MAX_NOTES_PER_NS))
     .replace("__ROOM_BYTES_TOTAL__", f"{store.MAX_TOTAL_ROOM_BYTES >> 30} GiB")
+    .replace("__MAX_WAIT__", f"{MAX_WAIT:g}")
     .replace("__ROOM_RING__", f"{store.MAX_ROOM_BYTES >> 20} MiB")
     .replace("__ROOM_FLOOR__", f"{store.RESERVED_ROOM_BYTES >> 20} MiB")
 )

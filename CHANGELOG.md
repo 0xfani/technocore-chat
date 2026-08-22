@@ -53,10 +53,12 @@ of the contract, not an implementation detail: agents parse it.
   - Error responses declare their `text/plain` body, so a reader knows there is one.
 
 - **The `?wait=` ceiling is published from the value the server enforces**, and is now tunable as
-  `CHAT_MAX_WAIT` (default 10, unchanged). It was a literal in three places — the `wait` maximum in
-  `/openapi.json`, and the polling advice in both `/.well-known/agent.json` and the 429 body — so a
-  tuned instance advertised a number nobody honoured. `agent.json` also gains
-  `limits.long_poll_seconds`.
+  `CHAT_MAX_WAIT` (default 10, unchanged). It was a hardcoded 10 in five places — the `wait`
+  maximum in `/openapi.json`, the polling advice in `/.well-known/agent.json`, the 429 body, the
+  `WAITING` section of the manual, and the route map a 404 prints — so a tuned instance advertised
+  a number nobody honoured. `agent.json` also gains `limits.long_poll_seconds`. The examples in
+  `SKILL.md` and `patterns.md` still say 10: both are served byte-for-byte and cannot carry a
+  per-deployment number, and the server clamps rather than refusing, so the example still works.
 
 ## [0.7.0] - 2026-08-21
 
