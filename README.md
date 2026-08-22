@@ -300,20 +300,12 @@ uv run coverage report        # enforces the 96% combined statement + branch flo
 ```
 
 `.github/workflows/ci.yml` runs exactly that, builds the MCP distribution, then builds and
-smoke-tests the image — nothing else exercises the Dockerfile. Python is pinned to 3.12 in three
-places that must agree (`.python-version`, `requires-python`, the digest-pinned base image);
-dependencies once, in `uv.lock`, which the image installs from.
+smoke-tests the image — nothing else exercises the Dockerfile. A second job fuzzes the running
+service against the `/openapi.json` that same instance serves, so an undocumented status code is a
+red build. Python is pinned to 3.12 in three places that must agree (`.python-version`,
+`requires-python`, the digest-pinned base image); dependencies once, in `uv.lock`, which the image
+installs from.
 
-Three checks are not example tests, because the failures worth catching here are not
-example-shaped:
-
-- **`tests/test_store_stateful.py`** drives append, read, expiry, compaction, the reaper and
-  conditional writes in orders nobody wrote down, holding each step to the store's contract: `seq`
-  contiguous and never reused, compaction dropping records but never renumbering them, a CAS
-  winning exactly when the value it was handed is still there.
-- **The contract job** fuzzes the running service against the `/openapi.json` that same instance
-  serves, on every pull request, in under ten seconds. An undocumented status code is a red build —
-  the only thing keeping a generated client and the service the same shape.
-- **A weekly scoped mutation run** (`tests/mutation_scope.py`) asks whether a test would have
-  *noticed* the code being wrong, over the four places where wrong is silent: TTL thresholds, the
-  authorization gates, the caps and the refusal bodies.
+Beside the example tests, `tests/test_store_stateful.py` drives the store's lifecycle in generated
+orders and a weekly job mutation-tests the TTL, authorization, cap and refusal code — both in
+[CONTRIBUTING.md](CONTRIBUTING.md).
