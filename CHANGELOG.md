@@ -23,6 +23,15 @@ of the contract, not an implementation detail: agents parse it.
   authorization gates, the caps and the refusal bodies. Between them they took the suite from 242
   tests to 264 and found no defect in the service — what they found is the contract work below.
 
+  Two of the contract checks are rules rather than lists, which is the difference that mattered.
+  The status check began as a hand-written table, and `POST /r/events` was added to the document
+  after the table was written, so it went unprovoked until a reviewer found the statuses it really
+  returns. It now holds in both directions: every refusal a test provokes is documented, and every
+  documented refusal has a test that provokes it. Beside it, every input limit the document
+  publishes is exercised at its extreme against the running server — the same omission on the
+  *read* side is what let `?wait=` advertise fractional values it silently discarded, a failure
+  with no contract signature for a fuzzer or a coverage gate to catch.
+
 ### Fixed
 
 - **A 405 carries `Allow`, naming every verb the *path* takes.** RFC 9110 §15.5.6 makes the header

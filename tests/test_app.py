@@ -55,6 +55,18 @@ def _reap_now(root):
     store._reap(root)
 
 
+def _ok(client, target, post=None):
+    """Send `target` (a path, or an already-made response) and require it to succeed.
+
+    A published limit is honoured only if the server *accepts* the extreme value; a 4xx
+    here means the document is advertising something no caller can use.
+    """
+    if isinstance(target, str):
+        target = client.post(target, json=post) if post is not None else client.get(target)
+    assert target.status_code == 200, f"published limit refused: {target.text[:160]}"
+    return target
+
+
 def _race_before_lock(monkeypatch, store, path, action):
     """Run `action()` once, in the gap between the store reading a file and locking it.
 
@@ -3935,21 +3947,76 @@ def test_an_integral_ceiling_publishes_as_an_integer(client):
     assert manifest.agent_manifest("", "0.7.0", 1, 1, 1, 10.0)["limits"]["long_poll_seconds"] == 10
 
 
-def test_every_status_an_operation_can_return_is_one_it_documents(client):
-    """An undocumented status is the failure neither a generated client nor a contract
-    fuzzer recovers from: the client treats an unannounced 403 as a transport fault and
-    retries the identical bytes, the fuzzer calls the service broken.
+# Statuses whose provoking case is a fixture rather than a request shape: 429 needs the
+# rate limiter wound down and 413 a quarter-megabyte upload, and both already have tests
+# built around exactly that. Everything else a caller can hit by choosing its own bytes.
+_REFUSALS = frozenset({"400", "403", "404", "409"})
 
-    So: provoke each refusal against the running app and require the spec to list it.
+
+def test_every_refusal_is_provoked_and_every_provoked_refusal_is_documented(client):
+    """Both directions, because each catches what the other cannot.
+
+    An undocumented status is the failure neither a generated client nor a contract fuzzer
+    recovers from: the client treats an unannounced 403 as a transport fault and retries
+    the identical bytes, the fuzzer calls the service broken. So every case below is
+    provoked against the running app and the spec must list what came back.
+
+    The second assertion is the one that would have saved a round of review. This started
+    as a hand-written table, and `POST /r/events` was added to the document *after* the
+    table was written — so it documented a 403 no test had ever asked for, and a reviewer
+    found the 400 and 413 it also returns. A table only covers what someone remembered to
+    add; requiring every documented refusal to have a case makes forgetting fail the build.
     """
     did, sign = _keypair()
-    other, _ = _keypair(2)
+    other, other_sign = _keypair(2)
     client.get("/kv/plans/held/set/first")
+    assert _claim(client, "d-owned", did, sign).status_code == 200
+    signed_note = f"{sign('room-owners|d-owned|4|' + other)}/4/{other}"
 
     # (openapi path, method, expected status, the request that produces it)
     cases = [
+        # Reads.
+        ("/r/{room}", "get", 400, lambda: client.get("/r/UPPER")),
+        ("/kv/{ns}", "get", 400, lambda: client.get("/kv/UPPER")),
         ("/kv/{ns}/{key}", "get", 400, lambda: client.get("/kv/UPPER/key")),
         ("/kv/{ns}/{key}", "get", 404, lambda: client.get("/kv/plans/never-written")),
+        # A sitemap needs an origin, and a Host that is not one leaves it with nothing to
+        # point at. Spaces cannot appear in a hostname, so this is never a real origin.
+        (
+            "/sitemap.xml",
+            "get",
+            404,
+            lambda: client.get("/sitemap.xml", headers={"host": "not a host"}),
+        ),
+        # The URL write lanes. `%0A` matches no route at all — deliberate, and the reason a
+        # message cannot forge a second JSONL record.
+        ("/r/{room}/say/{nick}/{text}", "get", 400, lambda: client.get("/r/UPPER/say/bot/hi")),
+        ("/r/{room}/say/{nick}/{text}", "get", 403, lambda: client.get("/r/mb-box/say/bot/hi")),
+        ("/r/{room}/say/{nick}/{text}", "get", 404, lambda: client.get("/r/lobby/say/bot/a%0Ab")),
+        ("/kv/{ns}/{key}/set/{value}", "get", 400, lambda: client.get("/kv/UPPER/k/set/v")),
+        ("/kv/{ns}/{key}/set/{value}", "get", 403, lambda: client.get("/kv/room-nonce/x/set/1")),
+        ("/kv/{ns}/{key}/set/{value}", "get", 404, lambda: client.get("/kv/plans/k/set/a%0Ab")),
+        (
+            "/kv/{ns}/{key}/set/{value}",
+            "get",
+            409,
+            lambda: client.get("/kv/plans/held/set/second?if=not-that"),
+        ),
+        # The POST lanes.
+        ("/r/{room}", "post", 400, lambda: client.post("/r/lobby", json={"from": "b", "text": ""})),
+        (
+            "/r/{room}",
+            "post",
+            403,
+            lambda: client.post("/r/mb-box", json={"from": "b", "text": "hi"}),
+        ),
+        ("/r/events", "post", 400, lambda: client.post("/r/events", content=b"not json")),
+        (
+            "/r/events",
+            "post",
+            403,
+            lambda: client.post("/r/events", json={"from": "b", "text": "hi"}),
+        ),
         ("/kv/{ns}/{key}", "post", 400, lambda: client.post("/kv/UPPER/k", json={"value": "v"})),
         # `required: ["value"]` never implied a *non-empty* value, and the sweep refuses one.
         ("/kv/{ns}/{key}", "post", 400, lambda: client.post("/kv/plans/k", json={"value": ""})),
@@ -3965,20 +4032,50 @@ def test_every_status_an_operation_can_return_is_one_it_documents(client):
             409,
             lambda: client.post("/kv/plans/held", json={"value": "v", "if": "not-that"}),
         ),
-        ("/r/{room}", "post", 400, lambda: client.post("/r/lobby", json={"from": "b", "text": ""})),
-        # A signature that does not verify is a refusal, not a malformed request…
+        # The signed lanes. A signature that does not verify is a refusal, not a malformed
+        # request; a stale nonce is the other way round.
+        (
+            "/r/{room}/say-signed/{did}/{sig}/{nonce}/{text}",
+            "get",
+            400,
+            lambda: client.get(f"/r/lobby/say-signed/{did}/{'A' * 86}/not-a-nonce/hi"),
+        ),
         (
             "/r/{room}/say-signed/{did}/{sig}/{nonce}/{text}",
             "get",
             403,
             lambda: client.get(f"/r/lobby/say-signed/{did}/{'A' * 86}/1/hi"),
         ),
-        # …and neither is a room that will not take this key.
+        (
+            "/r/{room}/say-signed/{did}/{sig}/{nonce}/{text}",
+            "get",
+            404,
+            lambda: client.get(f"/r/lobby/say-signed/{did}/{'A' * 86}/1/a%0Ab"),
+        ),
+        # …and a room that will not take this key is a refusal too.
         (
             "/r/{room}/say-signed/{did}/{sig}/{nonce}/{text}",
             "get",
             403,
-            lambda: _say_signed(client, "d-owned", other, _keypair(2)[1], "hi", nonce=3),
+            lambda: _say_signed(client, "d-owned", other, other_sign, "hi", nonce=3),
+        ),
+        (
+            "/kv/{ns}/{key}/set-signed/{did}/{sig}/{nonce}/{value}",
+            "get",
+            400,
+            lambda: _set_signed(client, "plans", "k", did, sign, "v", nonce=9),
+        ),
+        (
+            "/kv/{ns}/{key}/set-signed/{did}/{sig}/{nonce}/{value}",
+            "get",
+            403,
+            lambda: client.get(f"/kv/room-owners/d-owned/set-signed/{did}/{'A' * 86}/9/{other}"),
+        ),
+        (
+            "/kv/{ns}/{key}/set-signed/{did}/{sig}/{nonce}/{value}",
+            "get",
+            404,
+            lambda: client.get(f"/kv/room-owners/d-owned/set-signed/{did}/{'A' * 86}/9/a%0Ab"),
         ),
         # Notes have no ring, so the signed lane's nonce counter is itself a note claimed
         # with a compare-and-set: a racing writer loses on the counter, with a 409.
@@ -3987,13 +4084,10 @@ def test_every_status_an_operation_can_return_is_one_it_documents(client):
             "get",
             409,
             lambda: client.get(
-                f"/kv/room-owners/d-owned/set-signed/{did}/"
-                f"{sign(f'room-owners|d-owned|4|{other}')}/4/{other}?if=nothing-like-this"
+                f"/kv/room-owners/d-owned/set-signed/{did}/{signed_note}?if=nothing-like-this"
             ),
         ),
     ]
-
-    assert _claim(client, "d-owned", did, sign).status_code == 200
 
     doc = client.get("/openapi.json").json()
     for path, method, status, send in cases:
@@ -4001,6 +4095,117 @@ def test_every_status_an_operation_can_return_is_one_it_documents(client):
         assert response.status_code == status, f"{method.upper()} {path}: {response.text[:200]}"
         documented = doc["paths"][path][method]["responses"]
         assert str(status) in documented, f"{method.upper()} {path} can {status} undocumented"
+
+    # …and nothing documented is left unprovoked.
+    provoked = {(path, method, str(status)) for path, method, status, _ in cases}
+    unprovoked = sorted(
+        f"{method.upper()} {path} -> {code}"
+        for path, operations in doc["paths"].items()
+        for method, op in operations.items()
+        for code in op["responses"]
+        if code in _REFUSALS and (path, method, code) not in provoked
+    )
+    assert not unprovoked, f"documented but never provoked by a test: {unprovoked}"
+
+
+def _published_bounds(doc):
+    """Every input constraint the document publishes, keyed by the constraint itself.
+
+    Keyed by the bound rather than by the site because the same promise is repeated: the
+    name pattern appears on eleven parameters and means one thing each time. Twelve
+    distinct promises across forty-odd declarations.
+    """
+    keys = ("maximum", "minimum", "maxLength", "minLength", "enum", "pattern")
+    found = set()
+    for operations in doc["paths"].values():
+        for op in operations.values():
+            schemas = [p["schema"] for p in op.get("parameters", [])]
+            body = op.get("requestBody")
+            if body:
+                schemas += list(
+                    body["content"]["application/json"]["schema"]["properties"].values()
+                )
+            for schema in schemas:
+                bound = {k: schema[k] for k in keys if k in schema}
+                if bound:
+                    found.add(json.dumps(bound, sort_keys=True))
+    return found
+
+
+def test_every_published_limit_is_one_the_server_actually_honours(client, monkeypatch):
+    """The read side of the contract, which is where this branch kept going wrong.
+
+    Every fix here traced where a number is *written down* — three publishing sites for the
+    wait ceiling, then two more — and none of them asked who parses it back. That is
+    precisely where the bug was: `?wait=` was published as `type: number` and int-parsed,
+    so every fractional value a conforming client could send was silently discarded. The
+    failure had no contract signature at all — a documented 200 with a schema-valid body,
+    identical to an idle room — so no fuzzer, coverage gate or mutation run could see it.
+
+    So: take each bound at its extreme, send it, and require the server to honour it. And
+    require the table to cover every bound the document publishes, or the next parameter
+    added with a limit nobody honours passes unnoticed the same way.
+    """
+    import app as app_module
+
+    monkeypatch.setattr(app_module, "MAX_WAIT", 0.5)  # keep the long-poll case quick
+    doc = client.get("/openapi.json").json()
+    did, sign = _keypair()
+    longest_name = "a" * 48
+
+    def wait_is_honoured():
+        published = next(
+            p for p in doc["paths"]["/r/{room}"]["get"]["parameters"] if p["name"] == "wait"
+        )["schema"]["maximum"]
+        started = time.monotonic()
+        client.get(f"/r/idle?since=1&wait={published}")
+        # It has to actually hold the connection, not return an immediate empty reply that
+        # a caller cannot tell from a quiet room.
+        assert time.monotonic() - started >= published * 0.8
+
+    # (the bound as published, a request using it at its extreme)
+    checks = [
+        ('{"pattern": "^[a-z0-9][a-z0-9_-]{0,47}$"}', lambda: _ok(client, f"/r/{longest_name}")),
+        (
+            '{"maxLength": 4096, "minLength": 1}',
+            lambda: _ok(client, "/r/lobby", post={"from": "b", "text": "x" * 4096}),
+        ),
+        (
+            '{"maxLength": 8192, "minLength": 1}',
+            lambda: _ok(client, "/kv/plans/big", post={"value": "x" * 8192}),
+        ),
+        ('{"maximum": 200, "minimum": 1}', lambda: _ok(client, "/r/lobby?limit=200")),
+        ('{"minimum": 0}', lambda: _ok(client, "/r/lobby?since=0")),
+        ('{"minimum": 1}', lambda: _ok(client, "/rooms?limit=1")),
+        ('{"enum": ["json"]}', lambda: client.get("/r/lobby?format=json").json()),
+        ('{"enum": ["1"]}', lambda: _ok(client, "/kv/plans/fresh/set/v?if_absent=1")),
+        ('{"maximum": 0.5, "minimum": 0}', wait_is_honoured),
+        # The signed lane's three, at the exact shapes it publishes. A room each, because a
+        # nonce is single-use per key per room and the 19-digit one spends the ceiling —
+        # 10**19 - 1 being the largest the published pattern allows, and an int64 fits it.
+        (
+            '{"pattern": "^[0-9]{1,19}$"}',
+            lambda: _ok(
+                client, _say_signed(client, "big-nonce", did, sign, "hi", nonce=10**19 - 1)
+            ),
+        ),
+        (
+            '{"maxLength": 56, "minLength": 56, '
+            '"pattern": "^did:key:z6Mk[1-9A-HJ-NP-Za-km-z]{44}$"}',
+            lambda: _ok(client, _say_signed(client, "signed-did", did, sign, "signed")),
+        ),
+        (
+            '{"maxLength": 86, "minLength": 86, "pattern": "^[A-Za-z0-9_-]{86}$"}',
+            lambda: _ok(client, _say_signed(client, "signed-sig", did, sign, "again")),
+        ),
+    ]
+
+    for _bound, exercise in checks:
+        exercise()
+
+    covered = {bound for bound, _ in checks}
+    published = _published_bounds(doc)
+    assert not published - covered, f"published but never exercised: {sorted(published - covered)}"
 
 
 def test_the_signed_lane_publishes_the_shape_it_actually_enforces(client):
