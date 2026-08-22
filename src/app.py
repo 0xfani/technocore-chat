@@ -402,6 +402,28 @@ def _cursor[D: (int, None)](value: str | None, default: D) -> int | D:
     return n if n >= 0 else default
 
 
+def _seconds(value: str | None) -> float:
+    """`?wait=` in seconds: a non-negative float clamped to MAX_WAIT, 0 for anything else.
+
+    Float rather than `_cursor`'s int, because fractional waits are the point. WAIT_POLL is
+    half a second, so `wait=0.5` is the shortest wait that can return anything — the
+    constant's own comment calls it the useful floor — and the schema has always published
+    `type: number`. Int-parsing turned every fractional value into no wait at all, silently:
+    a caller asking for 0.5 got an immediate empty reply and no way to tell that from a
+    genuinely idle room. On an instance whose ceiling is under a second it defeated every
+    conforming value there is.
+
+    Clamped here rather than by the caller so the ceiling cannot be applied in one place and
+    forgotten in another. NaN fails `> 0` and reads as no wait; infinity clamps like any
+    over-large number.
+    """
+    try:
+        seconds = float(value)  # ty: ignore[invalid-argument-type]  # None raises TypeError
+    except (TypeError, ValueError):
+        return 0.0
+    return min(seconds, MAX_WAIT) if seconds > 0 else 0.0
+
+
 def text(
     body: str,
     status: int = 200,
@@ -912,7 +934,7 @@ async def room_read(request: Request) -> Response:
 
     # Waiting only means anything with a cursor: without `since` a read always returns the
     # newest messages, so there is nothing to wait *for*.
-    wait = min(_cursor(q.get("wait"), 0), MAX_WAIT)
+    wait = _seconds(q.get("wait"))
     if wait and since is not None and not view["messages"]:
         fresh = await _await_messages(request, room, limit, since, wait)
         if fresh is not None:

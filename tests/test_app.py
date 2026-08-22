@@ -139,6 +139,71 @@ def test_post_lane(client):
     assert client.post("/r/lobby", content=b"x" * (app_module.MAX_BODY + 1)).status_code == 413
 
 
+def test_a_fractional_wait_is_honoured_rather_than_silently_dropped(client, monkeypatch):
+    """`?wait=` is published as `type: number` and the poll interval is half a second, so
+    `wait=0.5` is the shortest wait that can return anything — the constant's own comment
+    calls it the useful floor. It was int-parsed, so every fractional value became no wait
+    at all, and the caller got an immediate empty reply indistinguishable from an idle
+    room. Review catch on #40.
+    """
+    import app as app_module
+
+    assert app_module._seconds("0.5") == 0.5
+    assert app_module._seconds("2.5") == 2.5
+    # Junk, negative and absent all mean "do not wait" rather than raising.
+    for junk in (None, "", "abc", "-1", "nan", "²"):
+        assert app_module._seconds(junk) == 0.0, junk
+    # The ceiling is applied here, so it cannot be enforced in one caller and forgotten in
+    # another. Infinity is just an over-large number.
+    monkeypatch.setattr(app_module, "MAX_WAIT", 1.0)
+    assert app_module._seconds("10") == 1.0
+    assert app_module._seconds("inf") == 1.0
+
+    # End to end: a fractional wait really does hold the connection open and then return.
+    started = time.monotonic()
+    r = client.get("/r/quiet?since=1&wait=0.5")
+    assert r.status_code == 200 and time.monotonic() - started >= 0.4
+
+
+def test_an_instance_with_a_sub_second_ceiling_still_polls(client, monkeypatch):
+    """The sharp end of the same bug: below a one-second ceiling every schema-conforming
+    positive wait int-parsed to zero, so the feature the document advertised could not be
+    used at all on that instance."""
+    import app as app_module
+
+    monkeypatch.setattr(app_module, "MAX_WAIT", 0.5)
+    published = next(
+        p
+        for p in client.get("/openapi.json").json()["paths"]["/r/{room}"]["get"]["parameters"]
+        if p["name"] == "wait"
+    )["schema"]
+    assert published["maximum"] == 0.5
+    # The largest value the schema permits is a wait the server actually takes.
+    assert app_module._seconds(str(published["maximum"])) == 0.5
+
+
+def test_posting_to_the_events_room_documents_what_it_really_answers(client):
+    """`/r/events` is the ordinary room POST handler with one room that always says no, so
+    the body is read and parsed *before* the refusal — a malformed or oversized body never
+    reaches the 403. Documenting only the 403 promised a client one outcome and delivered
+    three. Review catch on #40.
+    """
+    import app as app_module
+
+    documented = client.get("/openapi.json").json()["paths"]["/r/events"]["post"]
+    assert set(documented["responses"]) == {"400", "403", "413", "429"}
+    # It parses a body, so it declares one.
+    assert (
+        "text" in (documented["requestBody"]["content"]["application/json"]["schema"]["properties"])
+    )
+
+    assert client.post("/r/events", json={"from": "bot", "text": "hi"}).status_code == 403
+    assert client.post("/r/events", content=b"not json").status_code == 400
+    assert client.post("/r/events", json=[1, 2]).status_code == 400
+    oversize = client.post("/r/events", content=b"x" * (app_module.MAX_BODY + 1))
+    assert oversize.status_code == 413
+
+
 def test_the_body_cap_holds_when_nothing_declares_a_length(client):
     """Two bounds, and only one of them was ever reached. `await request.body()` buffers
     the whole upload before any size check, so a large POST was an OOM against a 128 MiB

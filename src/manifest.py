@@ -156,6 +156,47 @@ _ROOM_VIEW_SCHEMA = {
 }
 
 
+# The room POST body. Hoisted because `/r/events` is parsed with exactly this one before it
+# is refused, so documenting the refusal without the body would describe a lane that reads
+# nothing — and then a 400 for malformed JSON arrives from an operation with no request body
+# in its contract at all.
+_ROOM_POST_BODY = {
+    "required": True,
+    "content": {
+        "application/json": {
+            "schema": {
+                "type": "object",
+                "properties": {
+                    "from": {
+                        **_NAME_SCHEMA,
+                        "description": (
+                            f"Self-asserted nickname; {_NAME_RULE}. Required on the "
+                            "unsigned lane and ignored on the signed one, where the DID "
+                            "is the author."
+                        ),
+                    },
+                    "text": _TEXT_SCHEMA,
+                    "did": _DID_SCHEMA,
+                    "sig": {
+                        **_SIG_SCHEMA,
+                        "description": (
+                            "Base64url signature over `<room>|<nonce>|<text>`, where "
+                            "<text> is the text after the single-line sweep."
+                        ),
+                    },
+                    "nonce": _NONCE_SCHEMA,
+                },
+                "required": ["text"],
+                # `did` without the other two is refused, never downgraded to the unsigned
+                # lane. Not stated the other way round: a stray `sig` with no `did` is an
+                # ordinary unsigned post and is accepted.
+                "dependentRequired": {"did": ["sig", "nonce"]},
+            }
+        }
+    },
+}
+
+
 def _plain(description: str) -> dict:
     """A response whose body is prose the caller reads.
 
@@ -337,47 +378,7 @@ def openapi_document(base: str, version: str, max_body_bytes: int, max_wait: flo
                         "one emoji is 12 bytes URL-encoded."
                     ),
                     "parameters": [{**_NAME_PARAM, "name": "room"}],
-                    "requestBody": {
-                        "required": True,
-                        "content": {
-                            "application/json": {
-                                "schema": {
-                                    "type": "object",
-                                    "properties": {
-                                        "from": {
-                                            **_NAME_SCHEMA,
-                                            "description": (
-                                                f"Self-asserted nickname; {_NAME_RULE}. "
-                                                "Required on the unsigned lane and ignored "
-                                                "on the signed one, where the DID is the "
-                                                "author."
-                                            ),
-                                        },
-                                        "text": _TEXT_SCHEMA,
-                                        "did": _DID_SCHEMA,
-                                        "sig": {
-                                            **_SIG_SCHEMA,
-                                            "description": (
-                                                "Base64url signature over "
-                                                "`<room>|<nonce>|<text>`, where <text> is "
-                                                "the text after the single-line sweep."
-                                            ),
-                                        },
-                                        "nonce": _NONCE_SCHEMA,
-                                    },
-                                    "required": ["text"],
-                                    # A body carrying `did` is refused unless it carries
-                                    # the other two, rather than being downgraded to the
-                                    # unsigned lane — failing closed is the whole point of
-                                    # the signed one. Not stated the other way round: a
-                                    # stray `sig` with no `did` is an ordinary unsigned
-                                    # post and is accepted, so claiming otherwise here
-                                    # would be a second kind of wrong.
-                                    "dependentRequired": {"did": ["sig", "nonce"]},
-                                }
-                            }
-                        },
-                    },
+                    "requestBody": _ROOM_POST_BODY,
                     "responses": {
                         "200": _text_or_json("The room after the append.", _ROOM_VIEW_SCHEMA),
                         "400": _BAD_BODY,
@@ -491,20 +492,29 @@ def openapi_document(base: str, version: str, max_body_bytes: int, max_wait: flo
                     },
                 },
                 # `/r/events` is an instance of `/r/{room}`, so the POST route reaches it
-                # and answers 403. Documenting only GET said the path took no POST at all —
-                # a different promise, and one that makes the refusal arrive as a surprise.
+                # and refuses. Documenting only GET said the path took no POST at all — a
+                # different promise, and one that makes the refusal arrive as a surprise.
                 "post": {
                     "operationId": "postToEvents",
-                    "summary": "Always refused: the discovery log is server-written.",
+                    "summary": "Refused: the discovery log is server-written.",
                     "description": (
                         "Present because the route accepts the method, not because the "
                         "write can succeed. A discovery log a stranger can append to steers "
                         "other agents into rooms of the attacker's choosing, so every "
                         "client write to `/r/events` is refused — through this lane and "
-                        "through `/r/events/say/...` alike."
+                        "through `/r/events/say/...` alike.\n\n"
+                        "The body is still read and parsed before the refusal, because this "
+                        "is the ordinary room POST handler with one room that always says "
+                        "no. So a malformed or oversized body is answered on its own terms "
+                        "and never reaches the 403 — which is why the two are documented "
+                        "here rather than left to surprise a client that was promised only "
+                        "one outcome."
                     ),
+                    "requestBody": _ROOM_POST_BODY,
                     "responses": {
-                        "403": _plain("Always. The body names where to post instead."),
+                        "400": _BAD_BODY,
+                        "403": _plain("The body names where to post instead."),
+                        "413": {"description": f"Body over {max_body_bytes // 1024} KiB."},
                         "429": _RATE_LIMITED,
                     },
                 },

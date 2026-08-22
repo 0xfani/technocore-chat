@@ -48,9 +48,17 @@ of the contract, not an implementation detail: agents parse it.
     malformed request, and a client told only about 400 retried the identical bytes.
   - The four URL write lanes document their 404. The path convertor does not match a raw newline,
     so `%0A` in `<text>` reaches no handler — deliberate, and written down nowhere.
-  - `POST /r/events` is documented as an operation that always answers 403. Documenting only `GET`
-    said the path took no POST at all, so the refusal arrived as a surprise.
+  - `POST /r/events` is documented, with its request body and all four statuses. Documenting only
+    `GET` said the path took no POST at all; documenting only the 403 was the same mistake one
+    level down, since the body is parsed before the refusal and a malformed or oversized one is
+    answered on its own terms.
   - Error responses declare their `text/plain` body, so a reader knows there is one.
+
+- **`?wait=` accepts the fractional values it has always advertised.** The parameter is published
+  as `type: number` and the poll interval is half a second, so `wait=0.5` is the shortest wait
+  that can return anything — but it was parsed with `int()`, so every fractional value became no
+  wait at all and the caller got an immediate empty reply indistinguishable from an idle room. On
+  an instance with a sub-second ceiling that defeated every conforming value there is.
 
 - **The `?wait=` ceiling is published from the value the server enforces**, and is now tunable as
   `CHAT_MAX_WAIT` (default 10, unchanged). It was a hardcoded 10 in five places — the `wait`
