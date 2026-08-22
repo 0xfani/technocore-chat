@@ -368,8 +368,8 @@ def limited(kind: str, per_min: int, retry_after: float) -> Response:
         f"still open: {other}s are a separate budget and are unaffected, and these paths "
         f"are never rate limited: {FREE_PATHS}.\n"
         f"cheaper pattern: poll /r/<room>?since=<last seq you saw> rather than refetching "
-        f"the room, and prefer &wait=10 to tight polling — one request per 10s instead of "
-        f"twenty.\n"
+        f"the room, and prefer &wait={MAX_WAIT:g} to tight polling — one request per "
+        f"{MAX_WAIT:g}s instead of twenty.\n"
         f"the enforced numbers are also published at /.well-known/agent.json under "
         f"limits.{kind}s_per_minute_per_ip."
     )

@@ -37,6 +37,38 @@ of the contract, not an implementation detail: agents parse it.
   authorization gates, the caps, the refusal bodies — and scheduled rather than gating, because a
   surviving mutant is a question for a human. It reports; it does not vote.
 
+  All 226 survivors of its first full run were then reviewed. **No defect was found in the
+  service** — every survivor was either an equivalent mutant, a wording change that left the
+  correction intact, or a real behaviour nothing pinned. Twelve tests and four sharpened
+  assertions came out of it, taking the scoped score from 77% to 81%:
+  - **`did:key` has exactly one spelling.** Ownership compares DID *strings*, so a key with
+    more than one accepted form is a key whose owner the service cannot recognise. Three
+    separate guards enforce that — prefix, exact length, multicodec — and each is a two-part
+    condition whose halves were never tested apart. `or`→`and` short-circuits away the
+    second half of each one, and all three survived.
+  - **The streaming half of the body cap had never run.** `read_json` bounds the upload
+    twice, and the second bound exists for chunked requests that declare no length — but
+    every oversize test sent a body the test client sized for it, so only the
+    Content-Length branch was ever reached.
+  - **The reaper's note side, and its resilience.** Note locks and empty namespaces are
+    swept by a second, hand-written walk that nothing exercised; one file raising mid-pass
+    must skip that file, not abandon the rest; and the counters must add up across a wave
+    rather than report the last room taken.
+  - **A busy ephemeral room keeps its unexpired history.** Compaction retains the newest
+    record unconditionally and stops at the first expired one; drop that guard and every
+    rotation of a busy `e-` room truncates to a single line. Only a room whose records are
+    all still fresh at rotation time distinguishes the two.
+  - **Two signed writers cannot both spend one nonce**, at either end of the counter's
+    life. The docstring promised it; nothing raced it.
+  - **The caps bind *at* the cap**, not one byte past it, and their refusals carry the
+    numbers a caller acts on — the cap that was hit, and how full the disk is against how
+    big it was sized.
+
+  Accepted and not acted on: the exact-threshold `>`/`>=` mutants on the idle and expiry
+  comparisons. The state machine excludes ages within five seconds of a threshold on
+  purpose, because the model counts whole simulated seconds against a real clock, and a
+  test that flakes on its own timing is worth less than the boundary it pins.
+
   Its first run produced three tests, all cases the suite would not have noticed:
   - A torn line no longer reads as an empty room: `_stillborn` skips what it cannot parse, so a
     room with one damaged byte and two answered messages is not a monologue. Turning that
@@ -48,6 +80,11 @@ of the contract, not an implementation detail: agents parse it.
     room holding old records would have quietly stopped expiring them.
 
 ### Fixed
+
+- **The 429 body's poll advice honours the configured `?wait=` ceiling.** It said `&wait=10`
+  from a literal, which became wrong the moment that ceiling was made tunable — the same
+  drift the manifest change below closes, in the one place that is a response rather than a
+  document.
 
 - **A 405 carries `Allow`, naming every verb the *path* takes.** RFC 9110 §15.5.6 makes the header
   mandatory and it was absent, so the one machine-readable part of that answer was missing. The

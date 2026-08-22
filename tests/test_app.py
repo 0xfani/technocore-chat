@@ -67,6 +67,33 @@ def test_post_lane(client):
     assert client.post("/r/lobby", content=b"x" * (app_module.MAX_BODY + 1)).status_code == 413
 
 
+def test_the_body_cap_holds_when_nothing_declares_a_length(client):
+    """Two bounds, and only one of them was ever reached. `await request.body()` buffers
+    the whole upload before any size check, so a large POST was an OOM against a 128 MiB
+    container; the Content-Length refusal fixes the honest case and the streaming cap
+    fixes the rest. A chunked request declares no length, so the second bound is the only
+    one that applies there — and every oversize test until now sent a declared length,
+    because the test client computes one for you.
+    """
+    import app as app_module
+
+    def chunked():
+        for _ in range(4):
+            yield b"x" * (app_module.MAX_BODY // 2)
+
+    streamed = client.post("/r/lobby", content=chunked())
+    assert streamed.status_code == 413
+    assert "the stream passed it before it ended" in streamed.text
+
+    declared = client.post("/r/lobby", content=b"x" * (app_module.MAX_BODY + 1))
+    assert declared.status_code == 413
+    assert f"your Content-Length said {app_module.MAX_BODY + 1} bytes" in declared.text
+
+    # Both bodies name the cap, because a caller that just lost an upload needs the number.
+    for response in (streamed, declared):
+        assert f"the cap is {app_module.MAX_BODY} bytes" in response.text
+
+
 def test_post_lane_reports_write_budget_like_get_writes(client, monkeypatch):
     """POST pays the same write bucket as GET /say, so it must carry the same in-body
     budget hint for clients whose harness does not expose response headers.
@@ -122,6 +149,11 @@ def test_rate_limit_is_actionable_without_headers(client, monkeypatch):
     assert r.headers["retry-after"].isdigit()
     # the wait is in the body too: harness webfetch shows page text, not headers
     assert "retry after:" in r.text and "429 rate limited" in r.text
+    # …and it is the right order of magnitude. A bucket refilling at 4/min hands back a
+    # token in ~15s; the arithmetic that produces that is one character from reporting
+    # four minutes, and an agent that believes it sleeps through its own work.
+    assert 1 <= int(r.headers["retry-after"]) <= 60 // 4 + 1
+    assert f"retry after: {r.headers['retry-after']}s" in r.text  # header and body agree
     # the manual stays reachable while throttled, so a limited agent can learn to back off
     assert client.get("/llms.txt").status_code == 200
     assert client.get("/r/lobby").status_code == 200  # reads have their own budget
@@ -142,6 +174,20 @@ def test_the_429_names_the_budget_the_manual_deliberately_does_not(client, monke
     # what still works while throttled, and where to read the limits up front
     assert "reads are a separate budget" in r.text
     assert "limits.writes_per_minute_per_ip" in r.text
+    # The poll advice names the ceiling this instance enforces, not a hardcoded 10 — the
+    # same reason the manual states no rate limit it cannot guarantee.
+    assert f"&wait={app_module.MAX_WAIT:g}" in r.text
+
+    # The read bucket is the other half, and it is the one an agent hits first. `other` is
+    # computed from `kind`, so a 429 that names the wrong budget as "still open" sends the
+    # caller straight back into the bucket it just emptied.
+    monkeypatch.setattr(app_module, "RATE_READ", 1)
+    for _ in range(2):
+        read = client.get("/r/lobby")
+    assert read.status_code == 429
+    assert "the read budget for your IP (1/min) is spent" in read.text
+    assert "writes are a separate budget" in read.text
+    assert "limits.reads_per_minute_per_ip" in read.text
 
 
 def test_the_refill_rate_stays_a_number_an_agent_can_pace_against(client):
@@ -272,6 +318,69 @@ def test_the_byte_budget_bounds_growth_and_not_only_creation(tmp_path, monkeypat
     # And the floor still holds a conversation rather than truncating to nothing.
     view = store.read_messages(tmp_path, "first", limit=5)
     assert view["messages"], "compaction must never empty a room"
+
+
+def test_the_byte_budget_binds_at_the_cap_and_not_one_byte_past_it(tmp_path, monkeypatch):
+    """Both budget comparisons are `at or over`, and both were only ever driven strictly
+    over. `>=` vs `>` and `<` vs `<=` are invisible until usage lands exactly on the
+    number, which is precisely where an operator who sized the disk expects it to bite."""
+    import store
+
+    monkeypatch.setattr(store, "MAX_ROOMS", 10_000)  # far from binding: bytes must do it
+    store.append(tmp_path, "room0", "bot", "hi")
+    used = store._scan(tmp_path / "rooms", ".jsonl", sized=True)[1]
+    monkeypatch.setattr(store, "MAX_TOTAL_ROOM_BYTES", used)  # exactly at the budget
+
+    with pytest.raises(store.StoreError, match="room storage is full"):
+        store.append(tmp_path, "overflow", "bot", "hi")
+
+    # The same equality on the growth half: at the budget a room gets its floor, not the
+    # full ring, or "the budget bounds growth" is off by one byte.
+    (tmp_path / store.USAGE_FILE).write_text(str(used))
+    assert store._ring_limit(tmp_path) == store.RESERVED_ROOM_BYTES
+
+
+def test_a_capacity_refusal_carries_the_numbers_a_caller_acts_on(tmp_path, monkeypatch):
+    """These bodies are the service's answer to "now what", and the actionable part is the
+    figures: the cap that was hit, and how full the disk is against how big it was sized.
+    Matching only the opening words leaves every number in them free to be wrong."""
+    import store
+
+    monkeypatch.setattr(store, "MAX_ROOMS", 1)
+    store.append(tmp_path, "only", "bot", "hi")
+    with pytest.raises(store.StoreError, match=r"room limit reached \(1 is the cap"):
+        store.append(tmp_path, "second", "bot", "hi")
+
+    # Two note caps, two messages, and the number is the actionable part of both.
+    monkeypatch.setattr(store, "MAX_NOTES_PER_NS", 1)
+    store.note_set(tmp_path, "plans", "only", "hi")
+    with pytest.raises(store.StoreError, match=r"note limit reached \(1 is the cap"):
+        store.note_set(tmp_path, "plans", "second", "hi")
+
+    monkeypatch.setattr(store, "MAX_NOTES_PER_NS", 10_000)
+    monkeypatch.setattr(store, "MAX_NOTES_TOTAL", 1)
+    with pytest.raises(store.StoreError, match=r"note limit reached \(1 across all namespaces"):
+        store.note_set(tmp_path, "elsewhere", "second", "hi")
+
+    # "how full, of how much" is the figure an operator sizes a disk against, and the two
+    # shifts that produce it are one character from reporting megabytes as terabytes.
+    monkeypatch.setattr(store, "MAX_ROOMS", 10_000)
+    monkeypatch.setattr(store, "MAX_TOTAL_ROOM_BYTES", 3 << 20)
+    monkeypatch.setattr(store, "_scan", lambda *a, **k: (1, 5 << 20))  # 5 MiB on disk
+    with pytest.raises(store.StoreError, match="5 MiB of a 3 MiB budget"):
+        store.append(tmp_path, "overflow", "bot", "hi")
+
+
+def test_an_empty_usage_file_reads_as_no_pressure(tmp_path):
+    """A write cut short leaves the file there and empty. Reading that as *some* pressure
+    would throttle every room to its floor on the strength of a truncated write; the
+    documented default is 0, and it is the same fail-open as a missing file."""
+    import store
+
+    (tmp_path / store.USAGE_FILE).write_text("")
+    assert store.room_bytes_used(tmp_path) == 0
+    (tmp_path / store.USAGE_FILE).write_text("   \n")
+    assert store.room_bytes_used(tmp_path) == 0
 
 
 def test_the_reaper_records_room_usage_for_the_ring_to_read(tmp_path, monkeypatch):
@@ -644,6 +753,126 @@ def test_orphan_locks_are_swept(tmp_path):
     (tmp_path / ".reaped").unlink(missing_ok=True)
     store.append(tmp_path, "other", "bot", "again")  # next pass sweeps the orphan lock
     assert not lock.exists()
+
+
+def test_the_note_side_of_the_sweep_is_wired_up_too(tmp_path):
+    """Notes are nested one directory deeper than rooms and carry a different suffix, so
+    the sweep walks them with a second, hand-written tuple that nothing exercised — every
+    way of getting that tuple wrong leaves note locks and empty namespaces accumulating
+    forever, silently and unboundedly, on the half of the store nobody was watching."""
+    import store
+
+    store.note_set(tmp_path, "scratch", "gone", "value")
+    note = store.note_path(tmp_path, "scratch", "gone")
+    lock = note.with_suffix(".txt.lock")
+    assert lock.exists(), "premise: note writes leave a sidecar lock"
+
+    old = time.time() - store.IDLE_SECONDS - 60
+    for target in (note, lock):
+        os.utime(target, (old, old))
+    (tmp_path / ".reaped").unlink(missing_ok=True)
+    store._reap(tmp_path)  # takes the data file, keeps the lock a writer might hold
+    assert not note.exists()
+
+    (tmp_path / ".reaped").unlink(missing_ok=True)
+    store._reap(tmp_path)
+    assert not lock.exists(), "an orphaned note lock is swept like a room's"
+    # …and the namespace directory goes with the last note in it, or every namespace ever
+    # written stays on disk as an empty directory.
+    assert not note.parent.exists()
+
+
+def test_a_lock_is_never_swept_while_its_data_file_is_there(tmp_path):
+    """The sweep spares a lock whose data file still exists, whatever the lock's own age —
+    a lock is touched only when someone writes, so a busy room with a quiet week looks
+    exactly like an orphan. Unlinking it splits the lock domain: the next writer locks a
+    fresh inode and two writers append at once."""
+    import store
+
+    store.append(tmp_path, "quiet", "bot", "hi")
+    path = store.room_path(tmp_path, "quiet")
+    lock = path.with_suffix(".jsonl.lock")
+
+    old = time.time() - store.IDLE_SECONDS - 60
+    os.utime(lock, (old, old))  # the lock is stale; the room it guards is not
+    (tmp_path / ".reaped").unlink(missing_ok=True)
+    store._reap(tmp_path)
+
+    assert path.exists() and lock.exists()
+
+
+def test_one_unreadable_file_does_not_abort_the_whole_pass(tmp_path, monkeypatch):
+    """The reaper walks every room and note in one pass, and a racing writer or a
+    permission blip on any one of them is ordinary. Skipping that entry costs nothing;
+    stopping the pass leaves everything after it unreaped until the next interval, which
+    on a store under pressure is how a disk fills while the reaper reports success."""
+    import store
+
+    for room in ("first-idle", "second-idle"):
+        store.append(tmp_path, room, "bot", "hi")
+    old = time.time() - store.IDLE_SECONDS - 60
+    for room in ("first-idle", "second-idle"):
+        os.utime(store.room_path(tmp_path, room), (old, old))
+
+    real_locked = store._locked
+    exploded = []
+
+    @contextmanager
+    def explode_once(target):
+        if target.name.startswith("first-idle") and not exploded:
+            exploded.append(True)
+            raise OSError("racing writer")
+        with real_locked(target):
+            yield
+
+    monkeypatch.setattr(store, "_locked", explode_once)
+    (tmp_path / ".reaped").unlink(missing_ok=True)
+    store._reap(tmp_path)
+
+    assert exploded, "the failure never happened — this test proved nothing"
+    assert not store.room_path(tmp_path, "second-idle").exists(), "the pass stopped early"
+
+
+def test_reap_counts_every_room_it_takes_not_just_the_last(tmp_path):
+    """The counters are the only monotonic numbers in the store, and a digest reports
+    deltas from them. One reap pass usually takes many rooms; a counter that assigns
+    instead of accumulating reports 1 whatever the wave size, which is exactly the signal
+    a wave is supposed to produce."""
+    import store
+
+    for room in ("ended-one", "ended-two", "ended-three"):
+        store.append(tmp_path, room, "bot", "hi")
+        store.append(tmp_path, room, "other", "yes")  # answered, so the idle rule takes it
+    old = time.time() - store.IDLE_SECONDS - 60
+    for room in ("ended-one", "ended-two", "ended-three"):
+        os.utime(store.room_path(tmp_path, room), (old, old))
+
+    before = store.counters(tmp_path)["reaped_idle"]
+    (tmp_path / ".reaped").unlink(missing_ok=True)
+    store._reap(tmp_path)
+    assert store.counters(tmp_path)["reaped_idle"] == before + 3
+
+
+def test_an_ephemeral_room_keeps_the_history_that_has_not_expired(tmp_path, monkeypatch):
+    """Compaction retains the newest record of an `e-` room unconditionally, then stops at
+    the first expired one. The guard that makes it unconditional is `and kept`, and
+    dropping it turns every rotation of a *busy* ephemeral room into a truncation to one
+    line — losing history that is still well inside its TTL. Only a room whose records are
+    all fresh at rotation time can tell the two apart."""
+    import store
+
+    monkeypatch.setattr(store, "MAX_ROOM_BYTES", 2048)
+    monkeypatch.setattr(store, "COMPACT_KEEP_BYTES", 1024)
+
+    for i in range(40):  # well past the ring, and all of it written just now
+        store.append(tmp_path, "e-busy", "bot", f"message {i} " + "x" * 60)
+
+    view = store.read_messages(tmp_path, "e-busy", limit=50)
+    assert view["count"] > 1, "a rotating ephemeral room must keep unexpired history"
+    assert view["messages"][-1]["seq"] == store.last_seq(tmp_path, "e-busy")
+    # contiguous: compaction drops from the front, it never leaves a hole
+    seqs = [m["seq"] for m in view["messages"]]
+    assert seqs == list(range(seqs[0], seqs[-1] + 1))
 
 
 def test_reap_keeps_a_file_refreshed_after_the_stat(tmp_path, monkeypatch):
@@ -1852,6 +2081,51 @@ def _keypair(seed: int = 1):
     return f"{didkey.PREFIX}z{out}", sign
 
 
+def _multibase(raw: bytes) -> str:
+    alphabet = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
+    n = int.from_bytes(raw, "big")
+    out = ""
+    while n:
+        n, rem = divmod(n, 58)
+        out = alphabet[rem] + out
+    return out
+
+
+def test_a_did_key_has_exactly_one_spelling(client):
+    """Ownership compares DID *strings*: `_note_write_gate` asks `signer != current`, and
+    `_allowed_keys` matches by string. So a key with more than one accepted spelling is a
+    key whose owner the service cannot recognise — the caller signs with the same private
+    key, presents an alias, and fails its own allow-list.
+
+    Each of the three shapes below decodes to a real key's bytes and is refused only by
+    the *other* half of a two-part check. `or` → `and` short-circuits on the common
+    operand and silently deletes that half, which is why all three need pinning
+    separately rather than as one "malformed DID" case.
+    """
+    import didkey
+
+    did, _ = _keypair()
+    mb = did[len(didkey.PREFIX) :]
+    real = didkey.public_key(did)
+
+    # Right suffix, wrong prefix — same length, so only the `startswith` check refuses it.
+    alias = "XXXXXXXX" + mb
+    # Right prefix and leading `z`, one base58 zero-digit too long. Base58 ignores the
+    # padding, so it decodes to the same 34 bytes; only the exact-length check refuses it.
+    padded = didkey.PREFIX + "z1" + mb[1:]
+    # Right prefix and right length, but the multicodec says something other than
+    # ed25519-pub. Only the codec check refuses it.
+    wrong_codec = didkey.PREFIX + "z" + _multibase(b"\xe7\x01" + real)
+    assert len(wrong_codec) == len(did), "premise: this must pass the length check to matter"
+
+    for spelling in (alias, padded, wrong_codec):
+        with pytest.raises(didkey.DidError):
+            didkey.public_key(spelling)
+        assert not didkey.is_did(spelling)
+
+    assert didkey.public_key(did) == real  # …and the canonical one still works
+
+
 def _say_signed(client, room, did, sign, text, nonce=1):
     """The canonical string is `room|nonce|text` over the *swept* text — what is stored."""
     import store
@@ -2374,6 +2648,77 @@ def test_a_replayed_ownership_url_cannot_roll_an_allow_list_back(client):
     # the counter is server-written and world-readable, never client-writable
     assert client.get("/kv/room-nonce/d-bounty").text.strip().endswith("3")
     assert client.get("/kv/room-nonce/d-bounty/set/0").status_code == 403
+
+
+def test_two_signed_writers_cannot_both_spend_one_nonce(client, tmp_path, monkeypatch):
+    """The counter is read before it is claimed, so two writers racing one room both pass
+    the "greater than the last one" check against the same stale value. Only the
+    compare-and-set inside `note_set` separates them — without it both writes land, the
+    counter ends up at whichever finished last, and a nonce that was already spent becomes
+    spendable again. That is the single-use guarantee, and nothing exercised it.
+    """
+    import store
+
+    owner, owner_sign = _keypair()
+    assert _claim(client, "d-race", owner, owner_sign).status_code == 200  # burns nonce 1
+
+    counter = store.note_path(tmp_path, store.NONCE_NS, "d-race")
+    real_locked = store._locked
+    raced = []
+
+    @contextmanager
+    def spend_then_lock(target):
+        # The other writer gets there between our read of the counter and our claim on it.
+        if target == counter and not raced:
+            raced.append(True)
+            counter.write_text("9", encoding="utf-8")
+        with real_locked(target):
+            yield
+
+    monkeypatch.setattr(store, "_locked", spend_then_lock)
+    lost = _set_signed(client, store.ALLOW_NS, "d-race", owner, owner_sign, owner, nonce=5)
+
+    assert raced, "the race never happened — this test proved nothing"
+    assert lost.status_code == 409
+    # The loser must not drag the counter back to its own value: a nonce between 5 and 9
+    # would otherwise be spendable a second time.
+    assert store.note_get(tmp_path, store.NONCE_NS, "d-race") == "9"
+    # …and the write the burnt nonce was carrying does not land either.
+    assert store.note_get(tmp_path, store.ALLOW_NS, "d-race") is None
+
+
+def test_two_first_claims_cannot_both_create_one_nonce_counter(client, tmp_path, monkeypatch):
+    """The other end of the same guarantee. On a room's first signed write there is no
+    counter to compare against, so the CAS runs as create-if-absent instead — and if that
+    half is missing, two callers racing the first claim both create it and both spend
+    nonce 1. The replace path above cannot catch this one: it only engages once a counter
+    exists.
+    """
+    import store
+
+    owner, owner_sign = _keypair()
+    counter = store.note_path(tmp_path, store.NONCE_NS, "d-first")
+    real_locked = store._locked
+    raced = []
+
+    @contextmanager
+    def create_then_lock(target):
+        if target == counter and not raced:
+            raced.append(True)
+            counter.parent.mkdir(parents=True, exist_ok=True)
+            counter.write_text("1", encoding="utf-8")  # the other claim got there first
+        with real_locked(target):
+            yield
+
+    monkeypatch.setattr(store, "_locked", create_then_lock)
+    lost = _claim(client, "d-first", owner, owner_sign)
+
+    assert raced, "the race never happened — this test proved nothing"
+    assert lost.status_code == 409
+    assert store.note_get(tmp_path, store.NONCE_NS, "d-first") == "1"
+    # The loser's claim does not land: the room stays unowned rather than owned by whoever
+    # lost the race for its counter.
+    assert store.note_get(tmp_path, store.OWNERS_NS, "d-first") is None
 
 
 # ------------------------------------------------------------------ ephemeral rooms
@@ -2952,6 +3297,9 @@ def test_an_unsupported_verb_is_answered_with_the_get_lane_that_replaces_it(clie
     assert r.status_code == 405
     assert "/kv/<ns>/<key>/set/<value>" in r.text
     assert "append-only" in r.text  # …and why there is nothing to DELETE
+    # The pointer has to be fetchable as printed: routes are case-sensitive, so a body
+    # that shouted /LLMS.TXT would send an agent that copied it to a 404.
+    assert "/llms.txt" in r.text and client.get("/llms.txt").status_code == 200
 
 
 def test_a_405_carries_allow_and_names_every_verb_the_path_takes(client):
@@ -2999,6 +3347,10 @@ def test_a_lost_conditional_write_says_how_to_rebase(client):
     absent = client.get("/kv/plans/absent/set/x?if=something")
     assert absent.status_code == 409
     assert "no note there at all" in absent.text and "if_absent=1" in absent.text
+    # Both branches keep the store's own diagnostic ahead of the generic advice: the
+    # template says what to do, the exception says which condition actually fired.
+    assert absent.text.startswith("409 note plans/absent")
+    assert lost.text.startswith("409 note plans/next changed since you read it")
 
 
 def test_a_rejected_name_names_the_usual_causes(client):
