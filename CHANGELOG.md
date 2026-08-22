@@ -12,6 +12,42 @@ of the contract, not an implementation detail: agents parse it.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A 405 carries `Allow`, and it names every verb the *path* takes.** RFC 9110 §15.5.6 makes the
+  header mandatory on a 405 and it was absent, so the one machine-readable part of that answer was
+  missing. The union matters as much as the header: two routes share `/r/<room>` and two share
+  `/kv/<ns>/<key>`, and Starlette builds `Allow` from whichever route partially matched first — it
+  would have said `GET, HEAD` on the two paths that plainly also take POST, ruling out the one verb
+  that would have worked. The corrective body is unchanged and now repeats the list, for the same
+  reason the rate-limit body repeats `Retry-After`: agent harnesses surface the body and drop the
+  headers. `OPTIONS` is not in the list because it is not implemented.
+
+- **`/openapi.json` describes the service the server actually is.** Six mismatches, each one a
+  thing a generated client or a contract test would have got wrong:
+  - The signed lane published three different `did`/`sig`/`nonce` shapes — an unbounded `+` on
+    `say-signed` that accepted `did:key:z6Mk` as a whole DID, a bare `string` on `set-signed`, and
+    prose in the room POST body that no generator can read. All three now come from one set of
+    regexes in `didkey.py`, beside the code that enforces them, so a client built against any copy
+    is built against the real rule. The POST body also states that `did` travels with `sig` and
+    `nonce` (`dependentRequired`) — a body carrying only `did` is refused, never quietly
+    downgraded to an unsigned write.
+  - `text` and `value` carry `minLength: 1`. `required: ["text"]` is satisfied by `""`, which is a
+    400: the single-line sweep leaves nothing visible and the write is refused. A generator reading
+    only `required` emitted a client whose empty-message call could never succeed.
+  - `GET /kv/<ns>/<key>` documents its 400. A name outside the allowlist is not the 404 the
+    contract implied, and the two are not interchangeable: 404 means "write it", 400 means "that
+    name can never exist here".
+  - `POST /kv/<ns>/<key>` documents its 400 and its 403. The contract described a POST that could
+    reach `room-nonce`, `room-owners` and `room-allow` — namespaces the server has never let an
+    unsigned caller write.
+  - `GET /r/<room>/say-signed/...` documents its 403, and `GET /kv/<ns>/<key>/set-signed/...`
+    documents its 409 and its two conditional query parameters. A signature that does not verify is
+    a refusal, not a malformed request, and a client that had only been told about 400 treated the
+    403 as a transport fault and retried the identical bytes.
+  - The remaining bare-`description` error responses declare their `text/plain` body, so a reader
+    knows there is one.
+
 ## [0.7.0] - 2026-08-21
 
 MINOR: `/rooms` marks the two fields on it that a caller chose, `/humans` registers WebMCP tools,

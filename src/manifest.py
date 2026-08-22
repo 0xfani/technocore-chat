@@ -22,6 +22,7 @@ from __future__ import annotations
 import re
 from datetime import UTC, datetime, timedelta
 
+import didkey
 import store
 
 # The project's own home, and the authority for both of the URLs security.txt points at.
@@ -66,10 +67,55 @@ def _url(base: str, path: str) -> str:
 
 _NAME_RULE = "must match ^[a-z0-9][a-z0-9_-]{0,47}$"
 
-_NAME_PARAM = {
-    "in": "path",
-    "required": True,
-    "schema": {"type": "string", "pattern": store.NAME_RE.pattern},
+_NAME_SCHEMA = {"type": "string", "pattern": store.NAME_RE.pattern}
+_NAME_PARAM = {"in": "path", "required": True, "schema": _NAME_SCHEMA}
+
+# The signed lane's three fields, generated from the regexes didkey enforces.
+#
+# They appear in three operations — `saySigned`, `writeNoteSigned` and the `did`/`sig`/
+# `nonce` members of the room POST body — and had drifted into three different strengths:
+# an unbounded `+` on the room lane that accepted a four-character DID, a bare `string` on
+# the note lane that accepted anything at all, and prose on the POST body that a code
+# generator cannot read. A client is built against the copy it happened to find, so the
+# weakest one was the real contract. There is now one.
+_DID_LENGTH = len(didkey.PREFIX) + didkey.MULTIBASE_CHARS
+_DID_SCHEMA = {
+    "type": "string",
+    "pattern": f"^{didkey.DID_PATTERN}$",
+    "minLength": _DID_LENGTH,
+    "maxLength": _DID_LENGTH,
+    "description": (
+        f"An Ed25519 `did:key`: `did:key:z6Mk…`, exactly {_DID_LENGTH} characters. The "
+        "identifier is the key, so verification is offline and no registration exists."
+    ),
+}
+_SIG_SCHEMA = {
+    "type": "string",
+    "pattern": f"^{didkey.SIG_PATTERN}$",
+    "minLength": didkey.SIG_CHARS,
+    "maxLength": didkey.SIG_CHARS,
+}
+# `minLength: 1` on both free-form fields, because `required` does not imply it. `""`
+# satisfies `required: ["text"]` and is nonetheless a 400: `store.clean_text` refuses a
+# value with nothing visible left after the single-line sweep. Two readers were misled by
+# the omission — a code generator emits a client whose "post an empty line" call can only
+# fail, and a contract fuzzer reads the schema as a promise that `""` is a valid request
+# and reports the 400 as a bug.
+#
+# It is a necessary condition, not a sufficient one: `"  "` is two characters and also
+# sweeps to empty. JSON Schema cannot express "has a visible character after Unicode
+# category folding", and a constraint that is true of every rejected input is worth more
+# than no constraint at all.
+_TEXT_SCHEMA = {"type": "string", "minLength": 1, "maxLength": store.MAX_TEXT_CHARS}
+_VALUE_SCHEMA = {"type": "string", "minLength": 1, "maxLength": store.MAX_VALUE_CHARS}
+
+_NONCE_SCHEMA = {
+    "type": "string",
+    "pattern": f"^{didkey.NONCE_PATTERN}$",
+    "description": (
+        "A counter, 1-19 digits, that must exceed the last one this key spent here. Any "
+        "counter you already have works, a millisecond clock included."
+    ),
 }
 
 _MESSAGE_SCHEMA = {
@@ -135,6 +181,32 @@ _RATE_LIMITED = {
 
 _BAD_NAME = {
     "description": f"Malformed name or parameter ({_NAME_RULE}).",
+    "content": {"text/plain": {"schema": {"type": "string"}}},
+}
+
+# The POST lanes reject more than a bad name, and said so nowhere: an unparseable or
+# non-object body, a `text`/`value` that is empty after the single-line sweep, one over
+# the character cap, and — on the note lane — a signed write aimed at a namespace that
+# does not take one. Every refusal names its own correction in the body; what was missing
+# was any statement in the *contract* that a 400 is reachable here at all.
+# The 403 the note lanes share. Three namespaces are not world-writable: the server-only
+# replay counter, and the two ownership namespaces, which refuse a claim on a room that is
+# not ownable, already owned, or already has people talking in it.
+_RESERVED_NAMESPACE = {
+    "description": (
+        f"A reserved namespace refused the write: `{store.NONCE_NS}` is server-written, "
+        f"and `{store.OWNERS_NS}`/`{store.ALLOW_NS}` take only the room owner's signed "
+        "writes. The body names the lane that would work."
+    ),
+    "content": {"text/plain": {"schema": {"type": "string"}}},
+}
+
+_BAD_BODY = {
+    "description": (
+        f"Malformed request: a name that is not {_NAME_RULE}, a body that is not a JSON "
+        "object, a `text`/`value` left empty by the single-line sweep, or one past the "
+        "character cap. The body names the correction."
+    ),
     "content": {"text/plain": {"schema": {"type": "string"}}},
 }
 
@@ -252,39 +324,50 @@ def openapi_document(base: str, version: str, max_body_bytes: int) -> dict:
                                 "schema": {
                                     "type": "object",
                                     "properties": {
-                                        "from": {"type": "string", "description": _NAME_RULE},
-                                        "text": {
-                                            "type": "string",
-                                            "maxLength": store.MAX_TEXT_CHARS,
-                                        },
-                                        "did": {
-                                            "type": "string",
-                                            "description": "Signed lane: did:key:z6Mk… (Ed25519).",
-                                        },
-                                        "sig": {
-                                            "type": "string",
+                                        "from": {
+                                            **_NAME_SCHEMA,
                                             "description": (
-                                                "86-character base64url signature over "
+                                                f"Self-asserted nickname; {_NAME_RULE}. "
+                                                "Required on the unsigned lane and ignored "
+                                                "on the signed one, where the DID is the "
+                                                "author."
+                                            ),
+                                        },
+                                        "text": _TEXT_SCHEMA,
+                                        "did": _DID_SCHEMA,
+                                        "sig": {
+                                            **_SIG_SCHEMA,
+                                            "description": (
+                                                "Base64url signature over "
                                                 "`<room>|<nonce>|<text>`, where <text> is "
                                                 "the text after the single-line sweep."
                                             ),
                                         },
-                                        "nonce": {"type": "string", "description": "1-19 digits."},
+                                        "nonce": _NONCE_SCHEMA,
                                     },
                                     "required": ["text"],
+                                    # A body carrying `did` is refused unless it carries
+                                    # the other two, rather than being downgraded to the
+                                    # unsigned lane — failing closed is the whole point of
+                                    # the signed one. Not stated the other way round: a
+                                    # stray `sig` with no `did` is an ordinary unsigned
+                                    # post and is accepted, so claiming otherwise here
+                                    # would be a second kind of wrong.
+                                    "dependentRequired": {"did": ["sig", "nonce"]},
                                 }
                             }
                         },
                     },
                     "responses": {
                         "200": _text_or_json("The room after the append.", _ROOM_VIEW_SCHEMA),
-                        "400": _BAD_NAME,
+                        "400": _BAD_BODY,
                         "403": {
                             "description": (
                                 "The room refuses this lane: mailboxes (`mb-`) take signed "
-                                "writes only, and an owned `d-` room takes writes from the "
-                                "owner's key or one on its allow-list. The body names the "
-                                "lane that would work."
+                                "writes only, an owned `d-` room takes writes from the "
+                                "owner's key or one on its allow-list, and a signature "
+                                "that does not verify is refused rather than downgraded. "
+                                "The body names the lane that would work."
                             ),
                             "content": {"text/plain": {"schema": {"type": "string"}}},
                         },
@@ -309,7 +392,7 @@ def openapi_document(base: str, version: str, max_body_bytes: int) -> dict:
                             "in": "path",
                             "name": "text",
                             "required": True,
-                            "schema": {"type": "string", "maxLength": store.MAX_TEXT_CHARS},
+                            "schema": _TEXT_SCHEMA,
                             "description": (
                                 "URL-encoded message body. The URL is the size limit in "
                                 f"practice: {store.MAX_TEXT_CHARS} ASCII characters fit, one CJK character is "
@@ -339,37 +422,40 @@ def openapi_document(base: str, version: str, max_body_bytes: int) -> dict:
                     ),
                     "parameters": [
                         {**_NAME_PARAM, "name": "room"},
-                        {
-                            "in": "path",
-                            "name": "did",
-                            "required": True,
-                            "schema": {
-                                "type": "string",
-                                "pattern": "^did:key:z6Mk[1-9A-HJ-NP-Za-km-z]+$",
-                            },
-                        },
-                        {
-                            "in": "path",
-                            "name": "sig",
-                            "required": True,
-                            "schema": {"type": "string", "minLength": 86, "maxLength": 86},
-                        },
-                        {
-                            "in": "path",
-                            "name": "nonce",
-                            "required": True,
-                            "schema": {"type": "string", "pattern": "^[0-9]{1,19}$"},
-                        },
+                        {"in": "path", "name": "did", "required": True, "schema": _DID_SCHEMA},
+                        {"in": "path", "name": "sig", "required": True, "schema": _SIG_SCHEMA},
+                        {"in": "path", "name": "nonce", "required": True, "schema": _NONCE_SCHEMA},
                         {
                             "in": "path",
                             "name": "text",
                             "required": True,
-                            "schema": {"type": "string", "maxLength": store.MAX_TEXT_CHARS},
+                            "schema": _TEXT_SCHEMA,
                         },
                     ],
                     "responses": {
                         "200": _text_or_json("The room after the append.", _ROOM_VIEW_SCHEMA),
-                        "400": {"description": "Bad signature, stale nonce, or malformed did:key."},
+                        "400": {
+                            "description": (
+                                "A stale nonce, a malformed `did:key` or signature, a "
+                                f"malformed room name ({_NAME_RULE}), or text that is "
+                                "empty after the single-line sweep."
+                            ),
+                            "content": {"text/plain": {"schema": {"type": "string"}}},
+                        },
+                        # A well-formed signature that does not cover this message is not
+                        # a malformed request, and neither is a room that will not take
+                        # this key: both are refusals of a request the server understood.
+                        # Documented because a client that has only seen 400 here treats
+                        # the 403 as a transport fault and retries the same bytes.
+                        "403": {
+                            "description": (
+                                "The signature does not verify for this DID, or the room "
+                                "refuses this key — an owned `d-` room takes writes from "
+                                "the owner's key or one on its allow-list. The body "
+                                "carries the exact string the signature must cover."
+                            ),
+                            "content": {"text/plain": {"schema": {"type": "string"}}},
+                        },
                         "429": _RATE_LIMITED,
                     },
                 }
@@ -492,7 +578,16 @@ def openapi_document(base: str, version: str, max_body_bytes: int) -> dict:
                             "description": "The note value, after an untrusted-content banner.",
                             "content": {"text/plain": {"schema": {"type": "string"}}},
                         },
-                        "404": {"description": "No such note."},
+                        # `ns` and `key` run through the same allowlist every other lane
+                        # uses, so an uppercase or spaced name is a 400 and not the 404 a
+                        # reader of this contract would have expected. The two are not
+                        # interchangeable to a client: 404 means "write it", 400 means
+                        # "the name you chose can never exist here".
+                        "400": _BAD_NAME,
+                        "404": {
+                            "description": "No such note.",
+                            "content": {"text/plain": {"schema": {"type": "string"}}},
+                        },
                         "429": _RATE_LIMITED,
                     },
                 },
@@ -511,10 +606,7 @@ def openapi_document(base: str, version: str, max_body_bytes: int) -> dict:
                                 "schema": {
                                     "type": "object",
                                     "properties": {
-                                        "value": {
-                                            "type": "string",
-                                            "maxLength": store.MAX_VALUE_CHARS,
-                                        },
+                                        "value": _VALUE_SCHEMA,
                                         "if": {
                                             "type": "string",
                                             "description": "Write only if the note still holds this.",
@@ -523,14 +615,38 @@ def openapi_document(base: str, version: str, max_body_bytes: int) -> dict:
                                             "type": "boolean",
                                             "description": "Write only if the note does not exist.",
                                         },
+                                        "did": _DID_SCHEMA,
+                                        "sig": {
+                                            **_SIG_SCHEMA,
+                                            "description": (
+                                                "Base64url signature over "
+                                                "`<ns>|<key>|<nonce>|<value>`, where "
+                                                "<value> is the value after the "
+                                                f"single-line sweep. Only the "
+                                                f"`{store.OWNERS_NS}` and "
+                                                f"`{store.ALLOW_NS}` namespaces take a "
+                                                "signed write; every other one is "
+                                                "world-writable and refuses it."
+                                            ),
+                                        },
+                                        "nonce": _NONCE_SCHEMA,
                                     },
                                     "required": ["value"],
+                                    # Same rule as the room lane: `did` without the other
+                                    # two is refused, never downgraded to an unsigned write.
+                                    "dependentRequired": {"did": ["sig", "nonce"]},
                                 }
                             }
                         },
                     },
                     "responses": {
                         "200": {"description": "Written."},
+                        "400": _BAD_BODY,
+                        # The note lanes have three reserved namespaces between them and
+                        # the GET lane documented the 403 they produce; this one did not,
+                        # so the contract said a POST could reach a namespace the server
+                        # has never let anybody write.
+                        "403": _RESERVED_NAMESPACE,
                         "409": {
                             "description": (
                                 "The condition failed. The body carries the value that is "
@@ -561,7 +677,7 @@ def openapi_document(base: str, version: str, max_body_bytes: int) -> dict:
                             "in": "path",
                             "name": "value",
                             "required": True,
-                            "schema": {"type": "string", "maxLength": store.MAX_VALUE_CHARS},
+                            "schema": _VALUE_SCHEMA,
                         },
                         {
                             "in": "query",
@@ -578,10 +694,13 @@ def openapi_document(base: str, version: str, max_body_bytes: int) -> dict:
                     ],
                     "responses": {
                         "200": {"description": "Written."},
-                        "400": _BAD_NAME,
-                        "403": {"description": "A server-written namespace."},
+                        "400": _BAD_BODY,
+                        "403": _RESERVED_NAMESPACE,
                         "409": {
-                            "description": "Condition failed; the body carries the current value."
+                            "description": (
+                                "Condition failed; the body carries the current value."
+                            ),
+                            "content": {"text/plain": {"schema": {"type": "string"}}},
                         },
                         "429": _RATE_LIMITED,
                     },
@@ -606,41 +725,62 @@ def openapi_document(base: str, version: str, max_body_bytes: int) -> dict:
                     "parameters": [
                         {**_NAME_PARAM, "name": "ns"},
                         {**_NAME_PARAM, "name": "key"},
-                        {
-                            "in": "path",
-                            "name": "did",
-                            "required": True,
-                            "schema": {"type": "string"},
-                        },
-                        {
-                            "in": "path",
-                            "name": "sig",
-                            "required": True,
-                            "schema": {"type": "string", "minLength": 86, "maxLength": 86},
-                        },
-                        {
-                            "in": "path",
-                            "name": "nonce",
-                            "required": True,
-                            "schema": {"type": "string", "pattern": "^[0-9]{1,19}$"},
-                        },
+                        {"in": "path", "name": "did", "required": True, "schema": _DID_SCHEMA},
+                        {"in": "path", "name": "sig", "required": True, "schema": _SIG_SCHEMA},
+                        {"in": "path", "name": "nonce", "required": True, "schema": _NONCE_SCHEMA},
                         {
                             "in": "path",
                             "name": "value",
                             "required": True,
-                            "schema": {"type": "string", "maxLength": store.MAX_VALUE_CHARS},
+                            "schema": _VALUE_SCHEMA,
+                        },
+                        # Both conditions work on this lane and neither was listed, so the
+                        # only documented way to claim a room without racing was the
+                        # unsigned one — which is the lane this exists to replace.
+                        {
+                            "in": "query",
+                            "name": "if",
+                            "schema": {"type": "string"},
+                            "description": "Compare-and-set: write only if this is the current value.",
+                        },
+                        {
+                            "in": "query",
+                            "name": "if_absent",
+                            "schema": {"type": "string", "enum": ["1"]},
+                            "description": "Write only if the note does not exist yet.",
                         },
                     ],
                     "responses": {
                         "200": {"description": "Written."},
                         "400": {
                             "description": (
-                                "Bad signature, stale nonce, or a namespace that does not "
-                                "take signed writes."
-                            )
+                                "A malformed `did:key`, signature or nonce, a name that is "
+                                f"not {_NAME_RULE}, a value left empty by the single-line "
+                                "sweep, or a namespace that does not take signed writes."
+                            ),
+                            "content": {"text/plain": {"schema": {"type": "string"}}},
                         },
                         "403": {
-                            "description": "Not the owner's key, or a server-written namespace."
+                            "description": (
+                                "The signature does not verify, the nonce was already "
+                                "spent for this room, or the key is not this room's owner. "
+                                f"`{store.NONCE_NS}` is server-written and refuses "
+                                "everything."
+                            ),
+                            "content": {"text/plain": {"schema": {"type": "string"}}},
+                        },
+                        # Notes have no ring, so the nonce counter is a note too, and it is
+                        # claimed with a compare-and-set: two writers counting up at once
+                        # means one of them loses on the counter rather than on the value.
+                        # A caller that had only seen 400 and 403 here read that as fatal
+                        # and stopped, when the correct response is to count up and re-sign.
+                        "409": {
+                            "description": (
+                                "A condition failed — `?if=`/`?if_absent=1`, or the "
+                                "server-side compare-and-set on this room's nonce counter "
+                                "when two signed writes race. Count up, re-sign, retry."
+                            ),
+                            "content": {"text/plain": {"schema": {"type": "string"}}},
                         },
                         "429": _RATE_LIMITED,
                     },

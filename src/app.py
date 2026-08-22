@@ -14,7 +14,6 @@ import asyncio
 import hashlib
 import json
 import os
-import re
 import secrets
 import time
 import tomllib
@@ -28,7 +27,7 @@ from starlette.middleware import Middleware
 from starlette.middleware.cors import CORSMiddleware
 from starlette.requests import Request
 from starlette.responses import PlainTextResponse, Response
-from starlette.routing import Route
+from starlette.routing import Match, Route
 
 import didkey
 import manifest
@@ -134,10 +133,9 @@ PUBLIC_URL = os.environ.get("CHAT_PUBLIC_URL", "").strip()
 # the intended audience, so it says so where crawlers look — Cloudflare serves a Content
 # Signals Policy (or a managed AI-blocking robots.txt) for zones that ship none.
 
-# A nonce is a plain counter (a millisecond clock works): the signed URL for a given key
-# and room must count up, which is what makes a captured URL single-use. 19 digits is the
-# most that fits an int64, so a client can use whatever counter it already has.
-NONCE_RE = re.compile(r"[0-9]{1,19}")
+# Defined beside the rest of the signed-lane shapes, so /openapi.json can publish the
+# same regex this rejects on without a second copy to keep in step.
+NONCE_RE = didkey.NONCE_RE
 
 
 def _asset(name: str) -> str:
@@ -405,7 +403,12 @@ def _cursor[D: (int, None)](value: str | None, default: D) -> int | D:
 
 
 def text(
-    body: str, status: int = 200, *, index: bool = False, media_type: str = "text/plain"
+    body: str,
+    status: int = 200,
+    *,
+    index: bool = False,
+    media_type: str = "text/plain",
+    extra_headers: dict[str, str] | None = None,
 ) -> Response:
     """Plain text, `noindex` by default.
 
@@ -422,6 +425,8 @@ def text(
     }
     if not index:
         headers["X-Robots-Tag"] = "noindex"
+    if extra_headers:
+        headers.update(extra_headers)
     return PlainTextResponse(
         body if body.endswith("\n") else body + "\n",
         status_code=status,
@@ -1639,22 +1644,59 @@ async def on_not_found(request: Request, exc: Exception) -> Response:
     return text(NOT_FOUND, 404)
 
 
+# The order an `Allow` header is rendered in. RFC 9110 gives the list no significance, but
+# a header that reshuffles between responses is one more thing a caller has to normalise
+# before it can compare two of them — and one more way a test can flake.
+_METHOD_ORDER = ("GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS")
+
+
+def allowed_methods(request: Request) -> list[str]:
+    """Every method the *path* accepts, not just the first route that claimed it.
+
+    Two routes share `/r/<room>`: the GET reader and the POST writer, and the same for
+    `/kv/<ns>/<key>`. Starlette hands its 405 to whichever one partially matched first, so
+    the `Allow` it builds names that route's methods alone — `GET, HEAD` on a path that
+    plainly also takes POST. A caller that believes the header would then rule out the one
+    verb that would have worked. The union over every route that matches the path is the
+    only answer that is true of the resource rather than of one registration of it.
+    """
+    methods: set[str] = set()
+    for route in request.app.routes:
+        match, _ = route.matches(request.scope)
+        if match is not Match.NONE:
+            methods |= getattr(route, "methods", None) or set()
+    return [verb for verb in _METHOD_ORDER if verb in methods] + sorted(
+        methods.difference(_METHOD_ORDER)
+    )
+
+
 async def on_method_not_allowed(request: Request, exc: Exception) -> Response:
     """405 with the lane that would have worked.
 
     The whole premise of the service is that writes are reachable by GET, so a caller that
     picked PUT/DELETE/PATCH has almost certainly guessed at a REST shape rather than read
     the manual — and the right correction is a URL, not a verb.
+
+    `Allow` is required on a 405 (RFC 9110 §15.5.6) and was missing, which cost more than
+    pedantry: it is the one machine-readable part of this answer, and a client that probes
+    for a verb by sending one now learns the whole set from the response instead of one
+    round trip per method. The header is also repeated in the body, for the reason the
+    rate-limit response repeats Retry-After there — agent harnesses surface the body and
+    drop the headers, so a correction that lives only in a header does not reach the
+    reader who needs it.
     """
+    allow = allowed_methods(request)
     return text(
         f"405 {request.method} is not accepted here. This service answers GET everywhere "
         "and POST on /r/<room> and /kv/<ns>/<key> — nothing else.\n"
+        f"this path accepts: {', '.join(allow)}.\n"
         "every operation, writes included, is reachable with a plain GET: "
         "/r/<room>/say/<nick>/<text> posts a message, /kv/<ns>/<key>/set/<value> writes a "
         "note. POST exists only for bodies too long or too non-Latin for a URL.\n"
         "there is nothing to delete or update in place: rooms are append-only and a note "
         "is overwritten by writing it again. See /llms.txt.",
         405,
+        extra_headers={"Allow": ", ".join(allow)},
     )
 
 

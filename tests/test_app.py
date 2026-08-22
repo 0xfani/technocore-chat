@@ -2898,6 +2898,29 @@ def test_an_unsupported_verb_is_answered_with_the_get_lane_that_replaces_it(clie
     assert "append-only" in r.text  # …and why there is nothing to DELETE
 
 
+def test_a_405_carries_allow_and_names_every_verb_the_path_takes(client):
+    """RFC 9110 §15.5.6 makes `Allow` mandatory on a 405, and the union matters here: two
+    routes share `/r/<room>` and `/kv/<ns>/<key>`, so the first-partial-match header
+    Starlette builds would name `GET, HEAD` on paths that plainly also take POST — ruling
+    out the one verb that would have worked."""
+    for path in ("/r/lobby", "/kv/plans/next"):
+        r = client.request("PUT", path)
+        assert r.status_code == 405
+        assert r.headers["allow"] == "GET, HEAD, POST", path
+        # Repeated in the body for the same reason Retry-After is: agent harnesses show
+        # the body and drop the headers.
+        assert "this path accepts: GET, HEAD, POST" in r.text, path
+
+    # A read-only path says so rather than over-promising the POST the neighbours take.
+    for path in ("/rooms", "/llms.txt", "/r/lobby/say/bot/hi", "/kv/plans/next/set/x"):
+        r = client.request("PATCH", path)
+        assert r.status_code == 405 and r.headers["allow"] == "GET, HEAD", path
+
+    # OPTIONS is not implemented either, so it must not appear in a list of what is.
+    options = client.request("OPTIONS", "/healthz")
+    assert options.status_code == 405 and "OPTIONS" not in options.headers["allow"]
+
+
 def test_a_missing_note_says_how_to_create_it(client):
     """Absent and never-written are the same state, and both are ordinary: a note is
     created by writing it, so the useful reply is that URL."""
@@ -3029,6 +3052,159 @@ def test_the_spec_and_the_running_app_describe_the_same_service(client):
     assert len(ids) == len(set(ids)), "operationIds must be unique — clients name methods with them"
     for op in operations:
         assert op["summary"] and "200" in op["responses"]
+
+
+def test_every_status_an_operation_can_return_is_one_it_documents(client):
+    """The contract is what a generated client and a contract fuzzer both believe, and an
+    undocumented status is the failure mode neither of them can recover from: a client
+    that has never been told a 403 is possible treats it as a transport fault and retries
+    the identical bytes forever, and a fuzzer reports the service as broken.
+
+    So: provoke each refusal against the running app, and require the spec to list it.
+    Every pair below was undocumented at some point — the note lanes in particular
+    described a POST that could reach a namespace the server has never let anyone write.
+    """
+    did, sign = _keypair()
+    other, _ = _keypair(2)
+    client.get("/kv/plans/held/set/first")
+
+    # (openapi path, method, expected status, the request that produces it)
+    cases = [
+        ("/kv/{ns}/{key}", "get", 400, lambda: client.get("/kv/UPPER/key")),
+        ("/kv/{ns}/{key}", "get", 404, lambda: client.get("/kv/plans/never-written")),
+        ("/kv/{ns}/{key}", "post", 400, lambda: client.post("/kv/UPPER/k", json={"value": "v"})),
+        # `required: ["value"]` never implied a *non-empty* value, and the sweep refuses one.
+        ("/kv/{ns}/{key}", "post", 400, lambda: client.post("/kv/plans/k", json={"value": ""})),
+        (
+            "/kv/{ns}/{key}",
+            "post",
+            403,
+            lambda: client.post("/kv/room-nonce/lobby", json={"value": "9"}),
+        ),
+        (
+            "/kv/{ns}/{key}",
+            "post",
+            409,
+            lambda: client.post("/kv/plans/held", json={"value": "v", "if": "not-that"}),
+        ),
+        ("/r/{room}", "post", 400, lambda: client.post("/r/lobby", json={"from": "b", "text": ""})),
+        # A signature that does not verify is a refusal, not a malformed request…
+        (
+            "/r/{room}/say-signed/{did}/{sig}/{nonce}/{text}",
+            "get",
+            403,
+            lambda: client.get(f"/r/lobby/say-signed/{did}/{'A' * 86}/1/hi"),
+        ),
+        # …and neither is a room that will not take this key.
+        (
+            "/r/{room}/say-signed/{did}/{sig}/{nonce}/{text}",
+            "get",
+            403,
+            lambda: _say_signed(client, "d-owned", other, _keypair(2)[1], "hi", nonce=3),
+        ),
+        # Notes have no ring, so the signed lane's nonce counter is itself a note claimed
+        # with a compare-and-set: a racing writer loses on the counter, with a 409.
+        (
+            "/kv/{ns}/{key}/set-signed/{did}/{sig}/{nonce}/{value}",
+            "get",
+            409,
+            lambda: client.get(
+                f"/kv/room-owners/d-owned/set-signed/{did}/"
+                f"{sign(f'room-owners|d-owned|4|{other}')}/4/{other}?if=nothing-like-this"
+            ),
+        ),
+    ]
+
+    assert _claim(client, "d-owned", did, sign).status_code == 200
+
+    doc = client.get("/openapi.json").json()
+    for path, method, status, send in cases:
+        response = send()
+        assert response.status_code == status, f"{method.upper()} {path}: {response.text[:200]}"
+        documented = doc["paths"][path][method]["responses"]
+        assert str(status) in documented, f"{method.upper()} {path} can {status} undocumented"
+
+
+def test_the_signed_lane_publishes_the_shape_it_actually_enforces(client):
+    """One definition, three places it is published. The room lane's `did` pattern ended
+    in an unbounded `+`, so `did:key:z6Mk` satisfied the contract and nothing else;
+    the note lane's was a bare `string`; the POST body described both in prose a generator
+    cannot read. A client is built against whichever copy it found, so the weakest one was
+    the real contract.
+    """
+    import didkey
+
+    did, sign = _keypair()
+    doc = client.get("/openapi.json").json()
+
+    def param(path, name):
+        return next(p for p in doc["paths"][path]["get"]["parameters"] if p["name"] == name)[
+            "schema"
+        ]
+
+    say = "/r/{room}/say-signed/{did}/{sig}/{nonce}/{text}"
+    note = "/kv/{ns}/{key}/set-signed/{did}/{sig}/{nonce}/{value}"
+    body = doc["paths"]["/r/{room}"]["post"]["requestBody"]["content"]["application/json"]["schema"]
+
+    published = [param(say, "did"), param(note, "did"), body["properties"]["did"]]
+    assert len({json.dumps(schema, sort_keys=True) for schema in published}) == 1, (
+        "the two signed lanes and the POST body must publish one `did` shape"
+    )
+    for schema in published:
+        # A real key satisfies it, and the truncated DID the old pattern accepted does not.
+        assert re.fullmatch(schema["pattern"], did)
+        assert not re.fullmatch(schema["pattern"], "did:key:z6Mk")
+        assert schema["minLength"] == schema["maxLength"] == len(did)
+        assert len(did) == len(didkey.PREFIX) + didkey.MULTIBASE_CHARS
+
+    for schema in (param(say, "sig"), param(note, "sig"), body["properties"]["sig"]):
+        assert re.fullmatch(schema["pattern"], sign("anything"))
+        assert schema["minLength"] == schema["maxLength"] == didkey.SIG_CHARS
+    for schema in (param(say, "nonce"), param(note, "nonce"), body["properties"]["nonce"]):
+        assert re.fullmatch(schema["pattern"], "1") and not re.fullmatch(schema["pattern"], "x")
+
+    # `did` alone is refused rather than downgraded to an unsigned post, so the schema
+    # says which fields travel together instead of listing three loose optional strings.
+    assert body["dependentRequired"] == {"did": ["sig", "nonce"]}
+    assert client.post("/r/lobby", json={"text": "hi", "did": did}).status_code == 400
+    # …but a stray `sig` with no `did` is an ordinary unsigned post, and the schema must
+    # not claim otherwise.
+    assert client.post("/r/lobby", json={"from": "b", "text": "hi", "sig": "x"}).status_code == 200
+
+
+def test_a_free_form_field_publishes_that_it_cannot_be_empty(client):
+    """`required: ["text"]` is satisfied by `""`, which is a 400 here: the single-line
+    sweep leaves nothing visible and the write is refused. A generator reading only
+    `required` emits a client whose empty-message call can never succeed."""
+    import store
+
+    doc = client.get("/openapi.json").json()
+    schemas = {
+        "post /r/{room}.text": doc["paths"]["/r/{room}"]["post"]["requestBody"]["content"][
+            "application/json"
+        ]["schema"]["properties"]["text"],
+        "post /kv.value": doc["paths"]["/kv/{ns}/{key}"]["post"]["requestBody"]["content"][
+            "application/json"
+        ]["schema"]["properties"]["value"],
+        "get say.text": next(
+            p
+            for p in doc["paths"]["/r/{room}/say/{nick}/{text}"]["get"]["parameters"]
+            if p["name"] == "text"
+        )["schema"],
+        "get set.value": next(
+            p
+            for p in doc["paths"]["/kv/{ns}/{key}/set/{value}"]["get"]["parameters"]
+            if p["name"] == "value"
+        )["schema"],
+    }
+    for where, schema in schemas.items():
+        assert schema["minLength"] == 1, where
+    assert schemas["post /r/{room}.text"]["maxLength"] == store.MAX_TEXT_CHARS
+    assert schemas["post /kv.value"]["maxLength"] == store.MAX_VALUE_CHARS
+
+    # And the server agrees, on both lanes.
+    assert client.post("/r/lobby", json={"from": "bot", "text": ""}).status_code == 400
+    assert client.post("/kv/plans/k", json={"value": ""}).status_code == 400
 
 
 def test_openapi_limits_are_the_limits_the_server_enforces(client):
