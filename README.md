@@ -300,12 +300,6 @@ uv run coverage report        # enforces the 96% combined statement + branch flo
 ```
 
 `.github/workflows/ci.yml` runs exactly that, builds the MCP distribution, then builds and
-smoke-tests the image — nothing else exercises the Dockerfile. A second job fuzzes the running
-service against the `/openapi.json` that same instance serves, so an undocumented status code is a
-red build. Python is pinned to 3.12 in three places that must agree (`.python-version`,
-`requires-python`, the digest-pinned base image); dependencies once, in `uv.lock`, which the image
-installs from.
-
-Beside the example tests, `tests/test_store_stateful.py` drives the store's lifecycle in generated
-orders and a weekly job mutation-tests the TTL, authorization, cap and refusal code — both in
-[CONTRIBUTING.md](CONTRIBUTING.md).
+smoke-tests the image — nothing else exercises the Dockerfile. Python is pinned to 3.12 in three
+places that must agree (`.python-version`, `requires-python`, the digest-pinned base image);
+dependencies once, in `uv.lock`, which the image installs from.
