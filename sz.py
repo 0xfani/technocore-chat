@@ -19,7 +19,9 @@ packing statements shows up here. Stdlib ast + tokenize only.
 Per-file CAPS live beside the baseline in sz-baseline.json ("caps"): the baseline is a
 ratchet that only moves down, the caps are the policy ceiling it ratchets under. --check
 fails on growth past the baseline (naming the cap) and on any value past its cap even
-when the baseline was raised to match; --caps prints the table against the caps.
+when the baseline was raised to match; --caps prints the table against the caps. Every
+core label and core_total must have a cap — a missing entry is an error in the enforcing
+modes, not an exemption, so a file added to CORE_FILES cannot slip past the policy.
 
 Counting rules: a triple-quoted string literal is one token starting at one line, so an
 embedded prose document (app.py's MANUAL) counts as ~1 code line by design — embedded
@@ -149,16 +151,28 @@ def main():
         )
     print(f"{'core total (code)':<24} {'':>6} {core_total:>6}")
 
-    # Past a cap is past a cap even when the baseline was raised to match: the ratchet
-    # may only move down. This is the guard against --update-baseline absorbing growth
-    # the caps exist to force a decision about.
-    over = [
-        label
-        for label, m in files.items()
-        if label.startswith("core/") and label in caps and m["code_lines"] > caps[label]
-    ]
-    if core_total > caps.get("core_total", core_total):
-        over.append("core_total")
+    if args.check or args.caps:
+        # A core label missing from caps is a policy hole, not an exemption: a file added
+        # to CORE_FILES without a cap entry would sit outside the per-file policy
+        # entirely, its growth visible only to the (looser) aggregate — and a missing
+        # core_total cap disables even that. Adding a core file means deciding its cap,
+        # so the enforcing modes refuse to run until the table covers everything.
+        missing = [label for label in files if label.startswith("core/") and label not in caps]
+        if "core_total" not in caps:
+            missing.append("core_total")
+        if missing:
+            print(f"caps missing from sz-baseline.json: {', '.join(missing)}", file=sys.stderr)
+            return 1
+        # Past a cap is past a cap even when the baseline was raised to match: the
+        # ratchet may only move down. This is the guard against --update-baseline
+        # absorbing growth the caps exist to force a decision about.
+        over = [
+            label
+            for label, m in files.items()
+            if label.startswith("core/") and m["code_lines"] > caps[label]
+        ]
+        if core_total > caps["core_total"]:
+            over.append("core_total")
 
     if args.caps:
         print()
@@ -190,7 +204,7 @@ def main():
         if grown:
             detail = ", ".join(
                 f"{g} {baseline['files'][g]['code_lines']} -> {files[g]['code_lines']}"
-                f" (cap {caps.get(g, '?')})"
+                f" (cap {caps[g]})"
                 for g in grown
             )
             print(f"core code-lines grew vs sz-baseline.json: {detail}", file=sys.stderr)
@@ -198,7 +212,7 @@ def main():
         if core_total > baseline["core_total"]:
             print(
                 f"core total grew vs baseline: {baseline['core_total']} -> {core_total}"
-                f" (cap {caps.get('core_total', '?')})",
+                f" (cap {caps['core_total']})",
                 file=sys.stderr,
             )
             return 1
