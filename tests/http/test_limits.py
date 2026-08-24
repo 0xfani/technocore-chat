@@ -19,6 +19,7 @@ def test_a_fractional_wait_is_honoured_rather_than_silently_dropped(client, monk
     room. Review catch on #40.
     """
     import app as app_module
+    import config
 
     assert app_module._seconds("0.5") == 0.5
     assert app_module._seconds("2.5") == 2.5
@@ -27,9 +28,9 @@ def test_a_fractional_wait_is_honoured_rather_than_silently_dropped(client, monk
         assert app_module._seconds(junk) == 0.0, junk
     # The ceiling is applied here, so it cannot be enforced in one caller and forgotten in
     # another. Infinity is just an over-large number.
-    monkeypatch.setattr(app_module, "MAX_WAIT", 1.0)
-    assert app_module._seconds("10") == 1.0
-    assert app_module._seconds("inf") == 1.0
+    with config.override(MAX_WAIT=1.0):
+        assert app_module._seconds("10") == 1.0
+        assert app_module._seconds("inf") == 1.0
 
     # End to end: a fractional wait really does hold the connection open and then return.
     started = time.monotonic()
@@ -42,16 +43,17 @@ def test_an_instance_with_a_sub_second_ceiling_still_polls(client, monkeypatch):
     positive wait int-parsed to zero, so the feature the document advertised could not be
     used at all on that instance."""
     import app as app_module
+    import config
 
-    monkeypatch.setattr(app_module, "MAX_WAIT", 0.5)
-    published = next(
-        p
-        for p in client.get("/openapi.json").json()["paths"]["/r/{room}"]["get"]["parameters"]
-        if p["name"] == "wait"
-    )["schema"]
-    assert published["maximum"] == 0.5
-    # The largest value the schema permits is a wait the server actually takes.
-    assert app_module._seconds(str(published["maximum"])) == 0.5
+    with config.override(MAX_WAIT=0.5):
+        published = next(
+            p
+            for p in client.get("/openapi.json").json()["paths"]["/r/{room}"]["get"]["parameters"]
+            if p["name"] == "wait"
+        )["schema"]
+        assert published["maximum"] == 0.5
+        # The largest value the schema permits is a wait the server actually takes.
+        assert app_module._seconds(str(published["maximum"])) == 0.5
 
 
 def test_the_body_cap_holds_when_nothing_declares_a_length(client):
@@ -82,23 +84,24 @@ def test_the_body_cap_holds_when_nothing_declares_a_length(client):
 
 
 def test_rate_limit_is_actionable_without_headers(client, monkeypatch):
-    import app as app_module
+    import config
 
-    monkeypatch.setattr(app_module, "RATE_WRITE", 4)
-    codes = [client.get(f"/r/lobby/say/bot/m{i}").status_code for i in range(6)]
-    assert codes[:4] == [200] * 4 and codes[4:] == [429, 429]
-    r = client.get("/r/lobby/say/bot/again")
-    assert r.headers["retry-after"].isdigit()
-    # the wait is in the body too: harness webfetch shows page text, not headers
-    assert "retry after:" in r.text and "429 rate limited" in r.text
-    # …and it is the right order of magnitude. A bucket refilling at 4/min hands back a
-    # token in ~15s; the arithmetic that produces that is one character from reporting
-    # four minutes, and an agent that believes it sleeps through its own work.
-    assert 1 <= int(r.headers["retry-after"]) <= 60 // 4 + 1
-    assert f"retry after: {r.headers['retry-after']}s" in r.text  # header and body agree
-    # the manual stays reachable while throttled, so a limited agent can learn to back off
-    assert client.get("/llms.txt").status_code == 200
-    assert client.get("/r/lobby").status_code == 200  # reads have their own budget
+    with config.override(RATE_WRITE=4):
+        codes = [client.get(f"/r/lobby/say/bot/m{i}").status_code for i in range(6)]
+        assert codes[:4] == [200] * 4 and codes[4:] == [429, 429]
+        r = client.get("/r/lobby/say/bot/again")
+        assert r.headers["retry-after"].isdigit()
+        # the wait is in the body too: harness webfetch shows page text, not headers
+        assert "retry after:" in r.text and "429 rate limited" in r.text
+        # …and it is the right order of magnitude. A bucket refilling at 4/min hands back a
+        # token in ~15s; the arithmetic that produces that is one character from reporting
+        # four minutes, and an agent that believes it sleeps through its own work.
+        assert 1 <= int(r.headers["retry-after"]) <= 60 // 4 + 1
+        assert f"retry after: {r.headers['retry-after']}s" in r.text  # header and body agree
+        # the manual stays reachable while throttled, so a limited agent can learn to back
+        # off
+        assert client.get("/llms.txt").status_code == 200
+        assert client.get("/r/lobby").status_code == 200  # reads have their own budget
 
 
 def test_every_rate_limited_route_returns_the_same_recovery_plan(client, monkeypatch):
@@ -109,35 +112,35 @@ def test_every_rate_limited_route_returns_the_same_recovery_plan(client, monkeyp
     attacker can amplify, so malformed signed traffic has to spend its token before parsing.
     """
     import app as app_module
+    import config
 
-    monkeypatch.setattr(app_module, "RATE_READ", 1)
-    monkeypatch.setattr(app_module, "RATE_WRITE", 1)
-    signed = "/kv/room-owners/d-rate/set-signed/not-a-did/not-a-signature/1/not-a-did"
-    routes = (
-        ("read", "room read", lambda: client.get("/r/rate-tail")),
-        ("read", "note read", lambda: client.get("/kv/rate/missing")),
-        ("read", "note listing", lambda: client.get("/kv/rate")),
-        (
-            "write",
-            "room POST",
-            lambda: client.post("/r/rate-post", json={"from": "bot", "text": "hi"}),
-        ),
-        ("write", "note GET write", lambda: client.get("/kv/rate/get/set/value")),
-        ("write", "signed note write", lambda: client.get(signed)),
-        ("write", "note POST", lambda: client.post("/kv/rate/post", json={"value": "v"})),
-    )
+    with config.override(RATE_READ=1, RATE_WRITE=1):
+        signed = "/kv/room-owners/d-rate/set-signed/not-a-did/not-a-signature/1/not-a-did"
+        routes = (
+            ("read", "room read", lambda: client.get("/r/rate-tail")),
+            ("read", "note read", lambda: client.get("/kv/rate/missing")),
+            ("read", "note listing", lambda: client.get("/kv/rate")),
+            (
+                "write",
+                "room POST",
+                lambda: client.post("/r/rate-post", json={"from": "bot", "text": "hi"}),
+            ),
+            ("write", "note GET write", lambda: client.get("/kv/rate/get/set/value")),
+            ("write", "signed note write", lambda: client.get(signed)),
+            ("write", "note POST", lambda: client.post("/kv/rate/post", json={"value": "v"})),
+        )
 
-    for kind, label, call_route in routes:
-        app_module._buckets.clear()
-        first = call_route()
-        refused = call_route()
-        assert first.status_code != 429, label
-        assert refused.status_code == 429, label
-        assert f"the {kind} budget" in refused.text, label
-        assert "retry after:" in refused.text, label
-        assert "still open:" in refused.text, label
-        assert "prefer &wait=10 to tight polling" in refused.text, label
-        assert "/.well-known/agent.json" in refused.text, label
+        for kind, label, call_route in routes:
+            app_module._buckets.clear()
+            first = call_route()
+            refused = call_route()
+            assert first.status_code != 429, label
+            assert refused.status_code == 429, label
+            assert f"the {kind} budget" in refused.text, label
+            assert "retry after:" in refused.text, label
+            assert "still open:" in refused.text, label
+            assert "prefer &wait=10 to tight polling" in refused.text, label
+            assert "/.well-known/agent.json" in refused.text, label
 
 
 def test_the_429_names_the_budget_the_manual_deliberately_does_not(client, monkeypatch):
@@ -145,30 +148,31 @@ def test_the_429_names_the_budget_the_manual_deliberately_does_not(client, monke
     if the responses carry them — otherwise removing them from the manual just loses them.
     """
     import app as app_module
+    import config
 
-    monkeypatch.setattr(app_module, "RATE_WRITE", 2)
-    for i in range(3):
-        r = client.get(f"/r/lobby/say/bot/m{i}")
-    assert r.status_code == 429
-    assert "(2/min)" in r.text  # the enforced number, not a documented one
-    assert "one token every 30s" in r.text  # …and the refill, as a sleep
-    # what still works while throttled, and where to read the limits up front
-    assert "reads are a separate budget" in r.text
-    assert "limits.writes_per_minute_per_ip" in r.text
-    # The poll advice names the ceiling this instance enforces, not a hardcoded 10 — the
-    # same reason the manual states no rate limit it cannot guarantee.
-    assert f"&wait={app_module.MAX_WAIT:g}" in r.text
+    with config.override(RATE_WRITE=2):
+        for i in range(3):
+            r = client.get(f"/r/lobby/say/bot/m{i}")
+        assert r.status_code == 429
+        assert "(2/min)" in r.text  # the enforced number, not a documented one
+        assert "one token every 30s" in r.text  # …and the refill, as a sleep
+        # what still works while throttled, and where to read the limits up front
+        assert "reads are a separate budget" in r.text
+        assert "limits.writes_per_minute_per_ip" in r.text
+        # The poll advice names the ceiling this instance enforces, not a hardcoded 10 —
+        # the same reason the manual states no rate limit it cannot guarantee.
+        assert f"&wait={app_module.MAX_WAIT:g}" in r.text
 
-    # The read bucket is the other half, and it is the one an agent hits first. `other` is
-    # computed from `kind`, so a 429 that names the wrong budget as "still open" sends the
-    # caller straight back into the bucket it just emptied.
-    monkeypatch.setattr(app_module, "RATE_READ", 1)
-    for _ in range(2):
-        read = client.get("/r/lobby")
-    assert read.status_code == 429
-    assert "the read budget for your IP (1/min) is spent" in read.text
-    assert "writes are a separate budget" in read.text
-    assert "limits.reads_per_minute_per_ip" in read.text
+        # The read bucket is the other half, and it is the one an agent hits first.
+        # `other` is computed from `kind`, so a 429 that names the wrong budget as
+        # "still open" sends the caller straight back into the bucket it just emptied.
+        with config.override(RATE_READ=1):
+            for _ in range(2):
+                read = client.get("/r/lobby")
+            assert read.status_code == 429
+            assert "the read budget for your IP (1/min) is spent" in read.text
+            assert "writes are a separate budget" in read.text
+            assert "limits.reads_per_minute_per_ip" in read.text
 
 
 def test_a_zero_rate_limit_refuses_rather_than_crashing(monkeypatch, tmp_path):
@@ -208,34 +212,35 @@ def test_every_path_the_429_calls_free_really_is_free(client, monkeypatch):
     """Advice that fails at the moment it is taken is worse than no advice: a throttled
     agent following this list must not meet a second 429."""
     import app as app_module
+    import config
 
-    monkeypatch.setattr(app_module, "RATE_READ", 1)
-    client.get("/rooms")
-    assert client.get("/rooms").status_code == 429  # the budget really is spent
+    with config.override(RATE_READ=1):
+        client.get("/rooms")
+        assert client.get("/rooms").status_code == 429  # the budget really is spent
 
-    named = app_module.FREE_PATHS.replace(" and ", ", ").split(", ")
-    concrete = {
-        "/.well-known/*": [
-            "/.well-known/agent.json",
-            "/.well-known/api-catalog",
-            "/.well-known/ai-catalog.json",
-            "/.well-known/agent-skills/index.json",
-        ]
-    }
-    paths = [p for name in named for p in concrete.get(name.strip(), [name.strip()])]
-    assert len(paths) >= 8
-    for path in paths:
-        assert client.get(path).status_code == 200, f"{path} is advertised as free but is not"
+        named = app_module.FREE_PATHS.replace(" and ", ", ").split(", ")
+        concrete = {
+            "/.well-known/*": [
+                "/.well-known/agent.json",
+                "/.well-known/api-catalog",
+                "/.well-known/ai-catalog.json",
+                "/.well-known/agent-skills/index.json",
+            ]
+        }
+        paths = [p for name in named for p in concrete.get(name.strip(), [name.strip()])]
+        assert len(paths) >= 8
+        for path in paths:
+            assert client.get(path).status_code == 200, f"{path} is advertised as free but is not"
 
 
 def test_budget_warning_appears_before_the_wall(client, monkeypatch):
-    import app as app_module
+    import config
 
-    monkeypatch.setattr(app_module, "RATE_READ", 8)
-    assert "# budget:" not in client.get("/r/lobby").text
-    for _ in range(5):
-        client.get("/r/lobby")
-    assert "# budget: 1 of 8 reads left" in client.get("/r/lobby").text
+    with config.override(RATE_READ=8):
+        assert "# budget:" not in client.get("/r/lobby").text
+        for _ in range(5):
+            client.get("/r/lobby")
+        assert "# budget: 1 of 8 reads left" in client.get("/r/lobby").text
 
 
 def test_new_rooms_are_budgeted_per_ip_and_say_when_to_retry(client, monkeypatch):
@@ -244,39 +249,41 @@ def test_new_rooms_are_budgeted_per_ip_and_say_when_to_retry(client, monkeypatch
     Without it, MAX_ROOMS is not a cap so much as a race: at the write limit a single IP
     exhausts it in hours, and everyone else meets the fail-closed refusal.
     """
-    import app as app_module
+    import config
 
-    monkeypatch.setattr(app_module, "RATE_ROOMS_PER_DAY", 3)
-    for i in range(3):
-        assert client.get(f"/r/fresh{i}/say/bot/hi").status_code == 200
+    with config.override(RATE_ROOMS_PER_DAY=3):
+        for i in range(3):
+            assert client.get(f"/r/fresh{i}/say/bot/hi").status_code == 200
 
-    r = client.get("/r/one-too-many/say/bot/hi")
-    assert r.status_code == 429
-    assert int(r.headers["Retry-After"]) > 0  # machine-readable...
-    assert "retry after:" in r.text  # ...and in the body, which is all most harnesses show
-    assert "room-creation budget spent" in r.text
-    # The refusal has to leave the caller something to do *now*, or it is an outage with a
-    # timer on it. Rooms that exist are the answer, so the reply has to say so.
-    assert "ALREADY EXISTS" in r.text and "/r/lobby" in r.text
-    assert "one-too-many" not in client.get("/rooms").text  # and nothing was created
+        r = client.get("/r/one-too-many/say/bot/hi")
+        assert r.status_code == 429
+        assert int(r.headers["Retry-After"]) > 0  # machine-readable...
+        assert "retry after:" in r.text  # ...and in the body, which is all most harnesses
+        # show
+        assert "room-creation budget spent" in r.text
+        # The refusal has to leave the caller something to do *now*, or it is an outage
+        # with a timer on it. Rooms that exist are the answer, so the reply has to say so.
+        assert "ALREADY EXISTS" in r.text and "/r/lobby" in r.text
+        assert "one-too-many" not in client.get("/rooms").text  # and nothing was created
 
-    # The budget refills rather than resetting: no cliff, no stampede at a window boundary.
-    assert "refills continuously" in r.text
-    # Rooms this IP already has are untouched — the property that keeps work moving.
-    assert client.get("/r/fresh0/say/bot/still%20here").status_code == 200
+        # The budget refills rather than resetting: no cliff, no stampede at a window
+        # boundary.
+        assert "refills continuously" in r.text
+        # Rooms this IP already has are untouched — the property that keeps work moving.
+        assert client.get("/r/fresh0/say/bot/still%20here").status_code == 200
 
 
 def test_writing_to_an_existing_room_never_spends_the_room_budget(client, monkeypatch):
     """The budget is on *creation*. A long conversation in one room must cost exactly one."""
-    import app as app_module
+    import config
 
-    monkeypatch.setattr(app_module, "RATE_ROOMS_PER_DAY", 2)
-    monkeypatch.setattr(app_module, "RATE_WRITE", 500)  # isolate this from the write limit
-    assert client.get("/r/only/say/bot/hi").status_code == 200
-    for i in range(40):
-        assert client.get(f"/r/only/say/bot/msg{i}").status_code == 200
-    assert client.get("/r/second/say/bot/hi").status_code == 200  # the 2nd and last
-    assert client.get("/r/third/say/bot/hi").status_code == 429
+    # 500 writes/min isolates this from the write limit
+    with config.override(RATE_ROOMS_PER_DAY=2, RATE_WRITE=500):
+        assert client.get("/r/only/say/bot/hi").status_code == 200
+        for i in range(40):
+            assert client.get(f"/r/only/say/bot/msg{i}").status_code == 200
+        assert client.get("/r/second/say/bot/hi").status_code == 200  # the 2nd and last
+        assert client.get("/r/third/say/bot/hi").status_code == 429
 
 
 def test_only_the_request_that_creates_a_room_pays_for_it(client, monkeypatch):
@@ -287,30 +294,32 @@ def test_only_the_request_that_creates_a_room_pays_for_it(client, monkeypatch):
     loser appends to a room that exists by the time it gets through, and is refunded.
     """
     import app as app_module
+    import config
 
-    monkeypatch.setattr(app_module, "RATE_ROOMS_PER_DAY", 3)
+    with config.override(RATE_ROOMS_PER_DAY=3):
+        # The race, made deterministic: the first two gate checks both see the room as
+        # absent, which is exactly what two concurrent first-writers see. Timing alone
+        # would reproduce this only sometimes, and a test that passes by accident is worse
+        # than none — this one was written the sequential way first and passed with the
+        # refund deleted.
+        real = app_module._room_exists
+        seen = {"n": 0}
 
-    # The race, made deterministic: the first two gate checks both see the room as absent,
-    # which is exactly what two concurrent first-writers see. Timing alone would reproduce
-    # this only sometimes, and a test that passes by accident is worse than none — this one
-    # was written the sequential way first and passed with the refund deleted.
-    real = app_module._room_exists
-    seen = {"n": 0}
+        def racing(room: str) -> bool:
+            seen["n"] += 1
+            return False if seen["n"] <= 2 else real(room)
 
-    def racing(room: str) -> bool:
-        seen["n"] += 1
-        return False if seen["n"] <= 2 else real(room)
+        monkeypatch.setattr(app_module, "_room_exists", racing)
 
-    monkeypatch.setattr(app_module, "_room_exists", racing)
+        for _ in range(3):
+            assert client.get("/r/rendezvous/say/bot/hi").status_code == 200
 
-    for _ in range(3):
-        assert client.get("/r/rendezvous/say/bot/hi").status_code == 200
-
-    # One creation happened, so one token is spent: the loser appended to a room that
-    # already existed (seq 2) and got its token back. Two of three left = two more rooms.
-    assert client.get("/r/second-room/say/bot/hi").status_code == 200
-    assert client.get("/r/third-room/say/bot/hi").status_code == 200
-    assert client.get("/r/fourth-room/say/bot/hi").status_code == 429
+        # One creation happened, so one token is spent: the loser appended to a room that
+        # already existed (seq 2) and got its token back. Two of three left = two more
+        # rooms.
+        assert client.get("/r/second-room/say/bot/hi").status_code == 200
+        assert client.get("/r/third-room/say/bot/hi").status_code == 200
+        assert client.get("/r/fourth-room/say/bot/hi").status_code == 429
 
 
 def test_the_post_lanes_do_not_block_the_event_loop(client, monkeypatch):
@@ -397,16 +406,17 @@ def test_junk_query_params_never_500(client):
 def test_rate_limit_buckets_are_bounded(client, monkeypatch):
     """Every unseen IP adds entries; unbounded, a rotating-IP flood OOMs the container."""
     import app as app_module
+    import config
 
     monkeypatch.setattr(app_module, "MAX_BUCKETS", 8)
     # Opted in explicitly: no forwarded header is trusted by default, so without this the
     # whole loop is one client (the test socket) and nothing rotates.
-    monkeypatch.setattr(app_module, "CLIENT_IP_HEADER", "cf-connecting-ip")
-    for i in range(50):
-        client.get("/r/lobby", headers={"cf-connecting-ip": f"2001:db8::{i:x}"})
-    assert len(app_module._buckets) <= 8
-    # the survivors are the most recent callers, so an active client keeps its budget
-    assert ("2001:db8::31", "read") in app_module._buckets
+    with config.override(CLIENT_IP_HEADER="cf-connecting-ip"):
+        for i in range(50):
+            client.get("/r/lobby", headers={"cf-connecting-ip": f"2001:db8::{i:x}"})
+        assert len(app_module._buckets) <= 8
+        # the survivors are the most recent callers, so an active client keeps its budget
+        assert ("2001:db8::31", "read") in app_module._buckets
 
 
 def test_no_forwarded_header_is_trusted_by_default(client, monkeypatch):
@@ -425,9 +435,11 @@ def test_no_forwarded_header_is_trusted_by_default(client, monkeypatch):
     assert set(app_module._buckets) - before  # the peer's own bucket did get created
 
     # an operator whose origin really is locked to a proxy can still opt in
-    monkeypatch.setattr(app_module, "CLIENT_IP_HEADER", "cf-connecting-ip")
-    client.get("/r/lobby", headers=spoofed)
-    assert ("203.0.113.9", "read") in app_module._buckets
+    import config
+
+    with config.override(CLIENT_IP_HEADER="cf-connecting-ip"):
+        client.get("/r/lobby", headers=spoofed)
+        assert ("203.0.113.9", "read") in app_module._buckets
 
 
 def test_an_empty_trusted_proxy_header_falls_back_to_the_socket_peer(client, monkeypatch):
@@ -437,14 +449,15 @@ def test_an_empty_trusted_proxy_header_falls_back_to_the_socket_peer(client, mon
     the configured proxy owns the first hop, while anything after it may be caller input.
     """
     import app as app_module
+    import config
 
-    monkeypatch.setattr(app_module, "CLIENT_IP_HEADER", "cf-connecting-ip")
-    app_module._buckets.clear()
-    client.get("/r/lobby", headers={"cf-connecting-ip": " , 198.51.100.7"})
+    with config.override(CLIENT_IP_HEADER="cf-connecting-ip"):
+        app_module._buckets.clear()
+        client.get("/r/lobby", headers={"cf-connecting-ip": " , 198.51.100.7"})
 
-    identities = {ip for ip, kind in app_module._buckets if kind == "read"}
-    assert identities == {"testclient"}
-    assert "" not in identities and "198.51.100.7" not in identities
+        identities = {ip for ip, kind in app_module._buckets if kind == "read"}
+        assert identities == {"testclient"}
+        assert "" not in identities and "198.51.100.7" not in identities
 
 
 def _dockerfile_cmd() -> list[str]:
@@ -477,19 +490,19 @@ def test_a_budget_warning_never_reaches_the_json_lane(client, monkeypatch):
     degrade, it would stop parsing — and only once a caller was near its limit, which is
     the worst moment to discover it. Pinned because the number of `note=` callers grew.
     """
-    import app as app_module
+    import config
 
-    monkeypatch.setattr(app_module, "RATE_WRITE", 8)
-    for _ in range(6):
-        client.post("/r/lobby", json={"from": "a", "text": "x"})
+    with config.override(RATE_WRITE=8):
+        for _ in range(6):
+            client.post("/r/lobby", json={"from": "a", "text": "x"})
 
-    posted = client.post("/r/lobby?format=json", json={"from": "a", "text": "final"})
-    assert posted.headers["content-type"].startswith("application/json")
-    assert posted.json()["posted"]["text"] == "final"
-    assert "# budget:" not in posted.text
+        posted = client.post("/r/lobby?format=json", json={"from": "a", "text": "final"})
+        assert posted.headers["content-type"].startswith("application/json")
+        assert posted.json()["posted"]["text"] == "final"
+        assert "# budget:" not in posted.text
 
-    # The warning is not lost, it belongs to the lane that can carry it.
-    assert "# budget:" in client.post("/r/lobby", json={"from": "a", "text": "y"}).text
+        # The warning is not lost, it belongs to the lane that can carry it.
+        assert "# budget:" in client.post("/r/lobby", json={"from": "a", "text": "y"}).text
 
 
 def test_limit_is_clamped_to_the_response_budget(client):

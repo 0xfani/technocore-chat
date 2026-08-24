@@ -114,6 +114,7 @@ def test_rooms_cache_can_be_disabled_and_never_grows_past_its_bound(client, monk
     and a flood of distinct `limit` values cannot turn it into attacker-sized process state.
     """
     import app as app_module
+    import config
 
     real_stats = app_module.store.room_stats
     calls = []
@@ -123,17 +124,17 @@ def test_rooms_cache_can_be_disabled_and_never_grows_past_its_bound(client, monk
         return real_stats(*args, **kwargs)
 
     monkeypatch.setattr(app_module.store, "room_stats", counted)
-    monkeypatch.setattr(app_module, "ROOMS_CACHE_SECONDS", 0)
-    app_module._rooms_cache.clear()
-    client.get("/rooms?limit=7")
-    client.get("/rooms?limit=7")
-    assert calls == [7, 7] and app_module._rooms_cache == {}
+    with config.override(ROOMS_CACHE_SECONDS=0):
+        app_module._rooms_cache.clear()
+        client.get("/rooms?limit=7")
+        client.get("/rooms?limit=7")
+        assert calls == [7, 7] and app_module._rooms_cache == {}
 
-    monkeypatch.setattr(app_module, "ROOMS_CACHE_SECONDS", 60)
-    monkeypatch.setattr(app_module, "MAX_ROOMS_CACHE", 2)
-    for limit in (1, 2, 3):
-        client.get(f"/rooms?limit={limit}")
-    assert list(app_module._rooms_cache) == [2, 3]
+    with config.override(ROOMS_CACHE_SECONDS=60):
+        monkeypatch.setattr(app_module, "MAX_ROOMS_CACHE", 2)
+        for limit in (1, 2, 3):
+            client.get(f"/rooms?limit={limit}")
+        assert list(app_module._rooms_cache) == [2, 3]
 
 
 def test_rooms_overview_carries_stats_newest_first(client, tmp_path):
