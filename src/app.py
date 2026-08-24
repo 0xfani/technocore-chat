@@ -906,6 +906,7 @@ def room_say(request: Request) -> Response:
     if denied:
         return denied
     rec = store.append(config.ROOT, room, request.path_params["nick"], request.path_params["text"])
+    config._dbg(3, "write", room=room, seq=rec["seq"], chars=len(rec["text"]))
     limit._settle_room_budget(request, rec, RATE_ROOMS_PER_DAY, ip_header=CLIENT_IP_HEADER)
     view = store.read_messages(config.ROOT, room, limit=20)
     return respond(request, {**view, "posted": rec}, note=budget_note("write", left, RATE_WRITE))
@@ -933,6 +934,7 @@ def room_say_signed(request: Request) -> Response:
     if denied:
         return denied
     rec = store.append(config.ROOT, room, "", body, did=signer, nonce=int(nonce))
+    config._dbg(3, "write", room=room, seq=rec["seq"], chars=len(rec["text"]))
     limit._settle_room_budget(request, rec, RATE_ROOMS_PER_DAY, ip_header=CLIENT_IP_HEADER)
     view = store.read_messages(config.ROOT, room, limit=20)
     return respond(request, {**view, "posted": rec}, note=budget_note("write", left, RATE_WRITE))
@@ -1026,6 +1028,7 @@ async def room_post(request: Request) -> Response:
             )
         else:
             posted = store.append(config.ROOT, room, "", body, did=signer, nonce=int(nonce))
+        config._dbg(3, "write", room=room, seq=posted["seq"], chars=len(posted["text"]))
         limit._settle_room_budget(request, posted, RATE_ROOMS_PER_DAY, ip_header=CLIENT_IP_HEADER)
         return respond(
             request,

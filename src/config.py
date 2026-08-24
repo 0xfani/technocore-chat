@@ -105,6 +105,33 @@ def _finite_env(name: str, default: str) -> float:
 # exists to prevent.
 MAX_WAIT = max(0.0, _finite_env("CHAT_MAX_WAIT", "10"))
 
+# Operator debug ladder, stderr only. 1 = limiter take/refund verdicts with client
+# identity (limit.py); 2 = + store flock/compact/reap/CAS-conflict (store.py); 3 = + one
+# line per room write with room, seq and length (app.py). NEVER message content —
+# lengths, seqs and room names only — and never stdout or any room: stderr is operator
+# territory, and a debug line a caller could read is a disclosure, not a diagnostic. No
+# new HTTP surface; like every knob here it is overridable in tests
+# (config.override(DEBUG=2)). Junk floors to 0 with one warning rather than refusing to
+# boot, because a debug switch a tired operator can typo into an outage defeats itself.
+try:
+    DEBUG = min(3, max(0, int(os.environ.get("CHAT_DEBUG", "0"))))
+except ValueError:
+    print(f"CHAT_DEBUG={os.environ.get('CHAT_DEBUG')!r} is not 0-3; debug off", file=sys.stderr)
+    DEBUG = 0
+
+
+def _dbg(level: int, event: str, **fields) -> None:
+    """One stderr line — `event key=value ...` — when DEBUG >= level, nothing otherwise.
+
+    The level test is the first statement and the line is built only past it, so a
+    suppressed call is one comparison. Zero cost when off is the design constraint:
+    these sit on the hottest paths in the service.
+    """
+    if DEBUG < level:
+        return
+    print(" ".join([event, *(f"{k}={v}" for k, v in fields.items())]), file=sys.stderr)
+
+
 _NOT_THERE = object()
 
 
