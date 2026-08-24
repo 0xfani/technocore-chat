@@ -30,12 +30,14 @@ def test_post_lane_reports_write_budget_like_get_writes(client, monkeypatch):
     """POST pays the same write bucket as GET /say, so it must carry the same in-body
     budget hint for clients whose harness does not expose response headers.
     """
-    import app as app_module
+    import config
 
-    monkeypatch.setattr(app_module, "RATE_WRITE", 4)
-    responses = [client.post("/r/lobby", json={"from": "bot", "text": f"m{i}"}) for i in range(4)]
-    assert [response.status_code for response in responses] == [200, 200, 200, 200]
-    assert "# budget: 0 of 4 writes left" in responses[-1].text
+    with config.override(RATE_WRITE=4):
+        responses = [
+            client.post("/r/lobby", json={"from": "bot", "text": f"m{i}"}) for i in range(4)
+        ]
+        assert [response.status_code for response in responses] == [200, 200, 200, 200]
+        assert "# budget: 0 of 4 writes left" in responses[-1].text
 
 
 def test_a_lost_conditional_write_carries_the_value_after_the_first_line(client):
@@ -322,11 +324,11 @@ def test_an_unsigned_nick_can_never_look_verified(client):
 
 
 def test_signed_writes_pay_the_write_budget_like_any_other(client, monkeypatch):
-    import app as app_module
+    import config
 
-    monkeypatch.setattr(app_module, "RATE_WRITE", 2)
-    did, sign = _keypair()
-    codes = [
-        _say_signed(client, "lobby", did, sign, f"m{i}", nonce=i).status_code for i in (1, 2, 3)
-    ]
-    assert codes == [200, 200, 429]
+    with config.override(RATE_WRITE=2):
+        did, sign = _keypair()
+        codes = [
+            _say_signed(client, "lobby", did, sign, f"m{i}", nonce=i).status_code for i in (1, 2, 3)
+        ]
+        assert codes == [200, 200, 429]

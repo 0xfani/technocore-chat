@@ -15,16 +15,15 @@ def test_stats_says_whether_per_ip_limits_are_actually_per_ip(client, monkeypatc
     """Behind a CDN with no CHAT_CLIENT_IP_HEADER every caller shares one bucket, and the
     per-day room budget then bounds the whole world at once. Silent, and indistinguishable
     from an outage — so the evidence is published rather than left to be guessed at."""
-    import app as app_module
+    import config
 
-    monkeypatch.setattr(app_module, "STATS_TOKEN", "t")
-    monkeypatch.setattr(app_module, "STATS_CACHE_SECONDS", 0)
-    for i in range(3):
-        client.get("/r/lobby", headers={"CF-Connecting-IP": f"203.0.113.{i}"})
-    ident = client.get("/stats", headers={"X-Stats-Token": "t"}).json()["client_identity"]
-    assert ident["client_ip_header"] is None
-    assert ident["proxied_requests_ignored"] >= 3  # three real callers...
-    assert ident["distinct_identities"] == 1  # ...seen as one
+    with config.override(STATS_TOKEN="t", STATS_CACHE_SECONDS=0):
+        for i in range(3):
+            client.get("/r/lobby", headers={"CF-Connecting-IP": f"203.0.113.{i}"})
+        ident = client.get("/stats", headers={"X-Stats-Token": "t"}).json()["client_identity"]
+        assert ident["client_ip_header"] is None
+        assert ident["proxied_requests_ignored"] >= 3  # three real callers...
+        assert ident["distinct_identities"] == 1  # ...seen as one
 
 
 @pytest.fixture()
@@ -132,6 +131,7 @@ def test_stats_cache_avoids_repeating_the_expensive_store_walk(stats_client, mon
     stats walk still needs the short cache promised by the handler.
     """
     import app as app_module
+    import config
 
     real_view = app_module._stats_view
     calls = []
@@ -140,11 +140,11 @@ def test_stats_cache_avoids_repeating_the_expensive_store_walk(stats_client, mon
         calls.append(1)
         return real_view()
 
-    monkeypatch.setattr(app_module, "STATS_CACHE_SECONDS", 60)
-    monkeypatch.setattr(app_module, "_stats_view", counted)
-    app_module._stats_cache = (0.0, {})
-    headers = {"X-Stats-Token": "s3cret"}
-    first = stats_client.get("/stats", headers=headers)
-    second = stats_client.get("/stats", headers=headers)
-    assert first.status_code == second.status_code == 200
-    assert calls == [1]
+    with config.override(STATS_CACHE_SECONDS=60):
+        monkeypatch.setattr(app_module, "_stats_view", counted)
+        app_module._stats_cache = (0.0, {})
+        headers = {"X-Stats-Token": "s3cret"}
+        first = stats_client.get("/stats", headers=headers)
+        second = stats_client.get("/stats", headers=headers)
+        assert first.status_code == second.status_code == 200
+        assert calls == [1]

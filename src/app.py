@@ -35,21 +35,15 @@ import store
 from store import StoreConflictError, StoreError
 
 # The CHAT_* knobs are read from the environment exactly once, in config — the only
-# module in src/ that reads it — and re-bound here so request handlers (and the
-# tests that monkeypatch app.RATE_WRITE &c.) keep reading plain module globals. Tests that
-# need a different value for a whole request use config.override(...), which re-binds both
-# copies and restores them on exit.
-ROOT = config.ROOT
+# module in src/ that reads it — and read here as config.<name> at call time, so
+# config.override(...) reaches every reader with no second copy to keep in step. Four are
+# aliased anyway because tests still assert against them as app attributes (override
+# mirrors those copies); every other knob lost its alias when the last monkeypatch site
+# that needed one moved to override.
 RATE_READ = config.RATE_READ  # requests/min/IP
 RATE_WRITE = config.RATE_WRITE
 RATE_ROOMS_PER_DAY = config.RATE_ROOMS_PER_DAY
-CORS_ORIGINS = config.CORS_ORIGINS
-STATS_TOKEN = config.STATS_TOKEN
-STATS_CACHE_SECONDS = config.STATS_CACHE_SECONDS
-ROOMS_CACHE_SECONDS = config.ROOMS_CACHE_SECONDS
-SECURITY_CONTACT = config.SECURITY_CONTACT
 CLIENT_IP_HEADER = config.CLIENT_IP_HEADER
-PUBLIC_URL = config.PUBLIC_URL
 
 # Sized from what the wire actually carries, not from what a parser tolerates. A real
 # agent request through Cloudflare — Host, UA, Accept, CF-Connecting-IP, CF-Ray,
@@ -77,9 +71,8 @@ MAX_BODY = 256 << 10
 #
 # FREE_PATHS and PROXY_IP_HEADERS moved to limit with the 429 body and the client-IP
 # logic that reads them (FREE_PATHS is aliased in the re-export block below the helpers;
-# PROXY_IP_HEADERS resolves through the module __getattr__). STATS_TOKEN /
-# STATS_CACHE_SECONDS / ROOMS_CACHE_SECONDS / SECURITY_CONTACT / CLIENT_IP_HEADER live in
-# config; their rationale moved with them.
+# PROXY_IP_HEADERS resolves through the module __getattr__). The remaining CHAT_* knobs
+# live in config; their rationale moved with them.
 # robots.txt moved to manifest.robots_txt(base): the Sitemap directive takes an absolute
 # URL, so the document depends on the origin and can no longer be a constant. Agents are
 # the intended audience, so it says so where crawlers look — Cloudflare serves a Content
@@ -189,7 +182,7 @@ def _room_exists(room: str) -> bool:
     gate calls both see the room as absent — that race is what the refund below exists for,
     and reproducing it by timing alone is exactly the kind of test that passes by accident.
     """
-    return store.room_path(ROOT, room).exists()
+    return store.room_path(config.ROOT, room).exists()
 
 
 # limited() and _settle_room_budget() are called as limit.limited(...) /
@@ -432,7 +425,9 @@ def auth_md(request: Request) -> Response:
 
 
 def _base_url(request: Request) -> str:
-    return manifest.public_base(request.url.scheme, request.headers.get("host", ""), PUBLIC_URL)
+    return manifest.public_base(
+        request.url.scheme, request.headers.get("host", ""), config.PUBLIC_URL
+    )
 
 
 def _document(doc: dict) -> Response:
@@ -593,7 +588,7 @@ def _rooms_stamp() -> tuple:
     The clear in `take` stays because it is free and catches what the counters do not —
     note writes, which change the notes line and the topics shown beside a room.
     """
-    counted = store.counters(ROOT)
+    counted = store.counters(config.ROOT)
     return tuple(counted[key] for key in store.COUNTER_KEYS)
 
 
@@ -606,15 +601,15 @@ def _rooms_view(limit: int) -> dict:
     """
     now = time.monotonic()
     stamp = _rooms_stamp()  # before the walk, never after — see _rooms_stamp
-    if ROOMS_CACHE_SECONDS > 0:
+    if config.ROOMS_CACHE_SECONDS > 0:
         hit = _rooms_cache.get(limit)
-        if hit and hit[0] == stamp and now - hit[1] < ROOMS_CACHE_SECONDS:
+        if hit and hit[0] == stamp and now - hit[1] < config.ROOMS_CACHE_SECONDS:
             return hit[2]
-    view = store.room_stats(ROOT, limit=limit)
+    view = store.room_stats(config.ROOT, limit=limit)
     # Notes had no capacity surface at all: /kv/<ns> lists one namespace and namespaces are
     # unenumerable by design, so nothing showed how full the global note cap was. Aggregate
     # only — see store.note_stats for why a per-namespace breakdown must never appear here.
-    view["notes"] = store.note_stats(ROOT)
+    view["notes"] = store.note_stats(config.ROOT)
     # Unconditional, including when `rooms` is empty: it describes the schema, not the
     # payload. A field that shows up only once a hostile room exists is one clients parse
     # without, and the listing that needed it is the one that breaks. `fields` is the
@@ -626,7 +621,7 @@ def _rooms_view(limit: int) -> dict:
     view["engagement"]["windowed_note_to_message_ratio"] = (
         round(view["notes"]["total"] / seen, 4) if seen else None
     )
-    if ROOMS_CACHE_SECONDS > 0:
+    if config.ROOMS_CACHE_SECONDS > 0:
         _rooms_cache[limit] = (stamp, now, view)
         _rooms_cache.move_to_end(limit)
         while len(_rooms_cache) > MAX_ROOMS_CACHE:
@@ -727,7 +722,7 @@ async def room_read(request: Request) -> Response:
     room = request.path_params["room"]
     # Tail reads are blocking file IO. This route is async for the waiting half, so the
     # read has to go to a thread explicitly — as a sync route Starlette did that for us.
-    view = await run_in_threadpool(store.read_messages, ROOT, room, limit=tail, since=since)
+    view = await run_in_threadpool(store.read_messages, config.ROOT, room, limit=tail, since=since)
 
     # Waiting only means anything with a cursor: without `since` a read always returns the
     # newest messages, so there is nothing to wait *for*.
@@ -759,7 +754,7 @@ async def _await_messages(
             if await request.is_disconnected():
                 return None
             view = await run_in_threadpool(
-                store.read_messages, ROOT, room, limit=limit, since=since
+                store.read_messages, config.ROOT, room, limit=limit, since=since
             )
             if view["messages"]:
                 return view
@@ -785,14 +780,14 @@ def _reject_if_events_room(room: str) -> Response | None:
 
 def _allowed_keys(room: str) -> set[str]:
     """The keys an owned room accepts writes from: the owner plus /kv/room-allow/<room>."""
-    owner = store.note_get(ROOT, store.OWNERS_NS, room)
+    owner = store.note_get(config.ROOT, store.OWNERS_NS, room)
     if owner is None:
         return set()
     # A note that is not a DID cannot own anything, so the room fails closed rather than
     # falling back to open. note_write refuses to write one; this covers a value that
     # reached the volume some other way.
     keys = {owner} if didkey.is_did(owner) else set()
-    allow = store.note_get(ROOT, store.ALLOW_NS, room) or ""
+    allow = store.note_get(config.ROOT, store.ALLOW_NS, room) or ""
     return keys | {k for k in allow.split() if didkey.is_did(k)}
 
 
@@ -809,7 +804,7 @@ def _room_write_gate(request: Request, room: str, signer: str | None) -> Respons
             f"send: GET /r/{room}/say-signed/<did:key>/<sig>/<nonce>/<text> — see /llms.txt",
             403,
         )
-    if store.note_get(ROOT, store.OWNERS_NS, room) is not None:
+    if store.note_get(config.ROOT, store.OWNERS_NS, room) is not None:
         allowed = _allowed_keys(room)
         if signer is None:
             return text(
@@ -910,9 +905,10 @@ def room_say(request: Request) -> Response:
     denied = _room_write_gate(request, room, None)
     if denied:
         return denied
-    rec = store.append(ROOT, room, request.path_params["nick"], request.path_params["text"])
+    rec = store.append(config.ROOT, room, request.path_params["nick"], request.path_params["text"])
+    config._dbg(3, "write", room=room, seq=rec["seq"], chars=len(rec["text"]))
     limit._settle_room_budget(request, rec, RATE_ROOMS_PER_DAY, ip_header=CLIENT_IP_HEADER)
-    view = store.read_messages(ROOT, room, limit=20)
+    view = store.read_messages(config.ROOT, room, limit=20)
     return respond(request, {**view, "posted": rec}, note=budget_note("write", left, RATE_WRITE))
 
 
@@ -937,9 +933,10 @@ def room_say_signed(request: Request) -> Response:
     denied = _room_write_gate(request, room, signer)
     if denied:
         return denied
-    rec = store.append(ROOT, room, "", body, did=signer, nonce=int(nonce))
+    rec = store.append(config.ROOT, room, "", body, did=signer, nonce=int(nonce))
+    config._dbg(3, "write", room=room, seq=rec["seq"], chars=len(rec["text"]))
     limit._settle_room_budget(request, rec, RATE_ROOMS_PER_DAY, ip_header=CLIENT_IP_HEADER)
-    view = store.read_messages(ROOT, room, limit=20)
+    view = store.read_messages(config.ROOT, room, limit=20)
     return respond(request, {**view, "posted": rec}, note=budget_note("write", left, RATE_WRITE))
 
 
@@ -1027,14 +1024,15 @@ async def room_post(request: Request) -> Response:
             return denied
         if signer is None:
             posted = store.append(
-                ROOT, room, str(payload.get("from", "")), str(payload.get("text", ""))
+                config.ROOT, room, str(payload.get("from", "")), str(payload.get("text", ""))
             )
         else:
-            posted = store.append(ROOT, room, "", body, did=signer, nonce=int(nonce))
+            posted = store.append(config.ROOT, room, "", body, did=signer, nonce=int(nonce))
+        config._dbg(3, "write", room=room, seq=posted["seq"], chars=len(posted["text"]))
         limit._settle_room_budget(request, posted, RATE_ROOMS_PER_DAY, ip_header=CLIENT_IP_HEADER)
         return respond(
             request,
-            {**store.read_messages(ROOT, room, limit=20), "posted": posted},
+            {**store.read_messages(config.ROOT, room, limit=20), "posted": posted},
             note=budget_note("write", left, RATE_WRITE),
         )
 
@@ -1046,7 +1044,7 @@ def note_read(request: Request) -> Response:
     if retry:
         return limit.limited("read", RATE_READ, retry, text=text, max_wait=MAX_WAIT)
     p = request.path_params
-    value = store.note_get(ROOT, p["ns"], p["key"])
+    value = store.note_get(config.ROOT, p["ns"], p["key"])
     if value is None:
         # Absent and never-written are the same state here, and both are ordinary: notes
         # are created by writing them, so the useful reply is the URL that would create
@@ -1116,7 +1114,7 @@ def _note_write_gate(ns: str, key: str, value: str, signer: str | None) -> Respo
                 "they hold cannot own anything. Claim with the key you sign with.",
                 400,
             )
-        current = store.note_get(ROOT, store.OWNERS_NS, key)
+        current = store.note_get(config.ROOT, store.OWNERS_NS, key)
         if current is not None and signer != current:
             return text(
                 f"403 /r/{key} is already owned. Only the current owner can hand it over, "
@@ -1140,7 +1138,7 @@ def _note_write_gate(ns: str, key: str, value: str, signer: str | None) -> Respo
             )
         # "Claiming a room people are already talking in would lock them out" was documented
         # for the un-ownable rooms and never enforced for d- ones. Ownership is from birth.
-        if current is None and store.last_seq(ROOT, key) > 0:
+        if current is None and store.last_seq(config.ROOT, key) > 0:
             return text(
                 f"403 /r/{key} already has messages, so it can no longer be claimed — "
                 "a room is ownable from birth or not at all, or claiming becomes a way to "
@@ -1148,7 +1146,7 @@ def _note_write_gate(ns: str, key: str, value: str, signer: str | None) -> Respo
                 403,
             )
         return None
-    owner = store.note_get(ROOT, store.OWNERS_NS, key)
+    owner = store.note_get(config.ROOT, store.OWNERS_NS, key)
     if owner is None:
         return text(
             f"403 /r/{key} has no owner, so it has no allow-list. Claim it first, signing "
@@ -1184,7 +1182,7 @@ def note_write(request: Request) -> Response:
         return denied
     expect, expect_absent = _condition(dict(request.query_params))
     meta = store.note_set(
-        ROOT, p["ns"], p["key"], value, expect=expect, expect_absent=expect_absent
+        config.ROOT, p["ns"], p["key"], value, expect=expect, expect_absent=expect_absent
     )
     return respond(
         request,
@@ -1204,7 +1202,7 @@ def _burn_nonce(room: str, nonce: str) -> Response | None:
     the ordinary 409. A burnt nonce is not refunded if the write behind it then fails —
     counters only move forward, and re-signing costs one line of shell.
     """
-    current = store.note_get(ROOT, store.NONCE_NS, room)
+    current = store.note_get(config.ROOT, store.NONCE_NS, room)
     if current is not None and not (current.isdigit() and int(nonce) > int(current)):
         return text(
             f"403 nonce {nonce} was already used for /r/{room} (last {current}). A signed "
@@ -1212,7 +1210,7 @@ def _burn_nonce(room: str, nonce: str) -> Response | None:
             403,
         )
     store.note_set(
-        ROOT,
+        config.ROOT,
         store.NONCE_NS,
         room,
         nonce,
@@ -1240,7 +1238,7 @@ def note_write_signed(request: Request) -> Response:
     if denied:
         return denied
     expect, expect_absent = _condition(dict(request.query_params))
-    meta = store.note_set(ROOT, ns, key, value, expect=expect, expect_absent=expect_absent)
+    meta = store.note_set(config.ROOT, ns, key, value, expect=expect, expect_absent=expect_absent)
     return respond(
         request,
         meta,
@@ -1283,7 +1281,9 @@ async def note_post(request: Request) -> Response:
             burned = _burn_nonce(key, nonce)
             if burned:
                 return burned
-        meta = store.note_set(ROOT, ns, key, value, expect=expect, expect_absent=expect_absent)
+        meta = store.note_set(
+            config.ROOT, ns, key, value, expect=expect, expect_absent=expect_absent
+        )
         return respond(
             request,
             meta,
@@ -1299,7 +1299,7 @@ def note_list(request: Request) -> Response:
     if retry:
         return limit.limited("read", RATE_READ, retry, text=text, max_wait=MAX_WAIT)
     ns = request.path_params["ns"]
-    keys = store.list_notes(ROOT, ns)
+    keys = store.list_notes(config.ROOT, ns)
     return respond(
         request,
         {"ns": ns, "keys": keys},
@@ -1365,7 +1365,7 @@ def security_txt(request: Request) -> Response:
     reporting channel rather than anything a room wrote.
     """
     return text(
-        manifest.security_txt(_base_url(request), SECURITY_CONTACT),
+        manifest.security_txt(_base_url(request), config.SECURITY_CONTACT),
         index=True,
     )
 
@@ -1379,7 +1379,7 @@ _stats_cache: tuple[float, dict] = (0.0, {})
 
 def _stats_view() -> dict:
     """Live aggregates plus the stored history, in one blocking call for the threadpool."""
-    return {**store.service_stats(ROOT), "history": store.snapshots(ROOT)}
+    return {**store.service_stats(config.ROOT), "history": store.snapshots(config.ROOT)}
 
 
 async def stats(request: Request) -> Response:
@@ -1401,12 +1401,12 @@ async def stats(request: Request) -> Response:
     # The same bytes an unmatched path gets. The point of answering 404 rather than 401 is
     # that a prober cannot tell this endpoint from a path that was never routed, and a
     # distinctive body would give that back — so the two must not drift apart.
-    if not STATS_TOKEN or not secrets.compare_digest(supplied, STATS_TOKEN):
+    if not config.STATS_TOKEN or not secrets.compare_digest(supplied, config.STATS_TOKEN):
         return text(NOT_FOUND, 404)
     global _stats_cache
     fresh_at, cached = _stats_cache
     now = time.monotonic()
-    if cached and now - fresh_at < STATS_CACHE_SECONDS:
+    if cached and now - fresh_at < config.STATS_CACHE_SECONDS:
         view = cached
     else:
         view = await run_in_threadpool(_stats_view)
@@ -1600,7 +1600,7 @@ app = Starlette(
         Middleware(HeaderLimits),
         Middleware(
             CORSMiddleware,
-            allow_origins=CORS_ORIGINS,  # default: none, so no browser origin is trusted
+            allow_origins=config.CORS_ORIGINS,  # default: none, so no browser origin is trusted
             allow_methods=["GET", "POST"],
             allow_credentials=False,
         ),

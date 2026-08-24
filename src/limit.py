@@ -23,6 +23,8 @@ from contextlib import contextmanager
 from starlette.requests import Request
 from starlette.responses import Response
 
+import config
+
 # Headers a CDN sets and overwrites on every request. Their *presence* is not permission to
 # trust them — a direct caller can send any of them, which is the whole reason
 # CLIENT_IP_HEADER is opt-in — but it does mean the request plausibly arrived through that
@@ -127,6 +129,7 @@ def take(request, kind, per_min, burst=None, *, ip_header="", max_buckets=MAX_BU
     _requests[kind] = _requests.get(kind, 0) + 1
     if wait:
         _requests["rate_limited"] += 1
+    config._dbg(1, "take", ip=ip, kind=kind, left=int(tokens), wait=round(wait, 3))
     return int(tokens), wait
 
 
@@ -140,6 +143,7 @@ def refund(request, kind, per_min, burst=None, *, ip_header="") -> None:
     cap = float(per_min if burst is None else burst)
     tokens, last = _buckets.get((ip, kind), (cap, time.monotonic()))
     _buckets[(ip, kind)] = (min(cap, tokens + 1.0), last)
+    config._dbg(1, "refund", ip=ip, kind=kind)
 
 
 # Set by the room-creation gate on the request it charged, read once by _settle_room_budget.

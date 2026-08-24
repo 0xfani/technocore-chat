@@ -64,10 +64,10 @@ def test_security_txt_is_a_valid_rfc_9116_document(client):
 def test_the_security_contact_is_the_operators_to_set(client, monkeypatch):
     """This image is published. A third party running it must not end up advertising the
     upstream project's mailbox for a problem with their own deployment."""
-    import app as app_module
+    import config
 
-    monkeypatch.setattr(app_module, "SECURITY_CONTACT", "someone@example.org")
-    assert "mailto:someone@example.org" in client.get("/.well-known/security.txt").text
+    with config.override(SECURITY_CONTACT="someone@example.org"):
+        assert "mailto:someone@example.org" in client.get("/.well-known/security.txt").text
 
 
 def test_the_served_manual_states_the_caps_it_actually_enforces(client):
@@ -111,7 +111,7 @@ def test_robots_keeps_rooms_out_of_indexes_but_invites_the_manual(client):
 
 
 def test_skill_md_is_the_same_manual_and_is_never_rate_limited(client, monkeypatch):
-    import app as app_module
+    import config
 
     # Same bytes as the installable SKILL.md — one artifact, so the skill an agent
     # installs and the skill it fetches can never drift.
@@ -119,23 +119,23 @@ def test_skill_md_is_the_same_manual_and_is_never_rate_limited(client, monkeypat
     assert client.get("/skill.md").text == skill
     assert client.get("/skill.md").headers["content-type"].startswith("text/plain")
     assert "/llms.txt" in client.get("/skill.md").text  # points at the full reference
-    monkeypatch.setattr(app_module, "RATE_READ", 1)
-    for _ in range(5):
-        assert client.get("/skill.md").status_code == 200
+    with config.override(RATE_READ=1):
+        for _ in range(5):
+            assert client.get("/skill.md").status_code == 200
     assert "/skill.md" not in client.get("/robots.txt").text  # nothing disallows it
 
 
 def test_patterns_are_served_unlimited_and_the_manual_points_there(client, monkeypatch):
-    import app as app_module
+    import config
 
     page = client.get("/patterns.md")
     assert page.status_code == 200
     assert page.headers["content-type"].startswith("text/plain")
     assert "E2E" in page.text and "choreography" in page.text
     assert "/patterns.md" in client.get("/llms.txt").text  # the manual points here
-    monkeypatch.setattr(app_module, "RATE_READ", 1)
-    for _ in range(5):
-        assert client.get("/patterns.md").status_code == 200  # never rate limited
+    with config.override(RATE_READ=1):
+        for _ in range(5):
+            assert client.get("/patterns.md").status_code == 200  # never rate limited
     assert "/patterns.md" not in "".join(  # nothing disallows it for crawlers
         line for line in client.get("/robots.txt").text.splitlines() if "Disallow" in line
     )
@@ -591,66 +591,73 @@ def test_every_published_limit_is_one_the_server_actually_honours(client, monkey
     require the table to cover every bound the document publishes, or the next parameter
     added with a limit nobody honours passes unnoticed the same way.
     """
-    import app as app_module
+    import config
 
-    monkeypatch.setattr(app_module, "MAX_WAIT", 0.5)  # keep the long-poll case quick
-    doc = client.get("/openapi.json").json()
-    did, sign = _keypair()
-    longest_name = "a" * 48
+    # keep the long-poll case quick
+    with config.override(MAX_WAIT=0.5):
+        doc = client.get("/openapi.json").json()
+        did, sign = _keypair()
+        longest_name = "a" * 48
 
-    def wait_is_honoured():
-        published = next(
-            p for p in doc["paths"]["/r/{room}"]["get"]["parameters"] if p["name"] == "wait"
-        )["schema"]["maximum"]
-        started = time.monotonic()
-        client.get(f"/r/idle?since=1&wait={published}")
-        # It has to actually hold the connection, not return an immediate empty reply that
-        # a caller cannot tell from a quiet room.
-        assert time.monotonic() - started >= published * 0.8
+        def wait_is_honoured():
+            published = next(
+                p for p in doc["paths"]["/r/{room}"]["get"]["parameters"] if p["name"] == "wait"
+            )["schema"]["maximum"]
+            started = time.monotonic()
+            client.get(f"/r/idle?since=1&wait={published}")
+            # It has to actually hold the connection, not return an immediate empty reply
+            # that a caller cannot tell from a quiet room.
+            assert time.monotonic() - started >= published * 0.8
 
-    # (the bound as published, a request using it at its extreme)
-    checks = [
-        ('{"pattern": "^[a-z0-9][a-z0-9_-]{0,47}$"}', lambda: _ok(client, f"/r/{longest_name}")),
-        (
-            '{"maxLength": 4096, "minLength": 1}',
-            lambda: _ok(client, "/r/lobby", post={"from": "b", "text": "x" * 4096}),
-        ),
-        (
-            '{"maxLength": 8192, "minLength": 1}',
-            lambda: _ok(client, "/kv/plans/big", post={"value": "x" * 8192}),
-        ),
-        ('{"maximum": 200, "minimum": 1}', lambda: _ok(client, "/r/lobby?limit=200")),
-        ('{"minimum": 0}', lambda: _ok(client, "/r/lobby?since=0")),
-        ('{"minimum": 1}', lambda: _ok(client, "/rooms?limit=1")),
-        ('{"enum": ["json"]}', lambda: client.get("/r/lobby?format=json").json()),
-        ('{"enum": ["1"]}', lambda: _ok(client, "/kv/plans/fresh/set/v?if_absent=1")),
-        ('{"maximum": 0.5, "minimum": 0}', wait_is_honoured),
-        # The signed lane's three, at the exact shapes it publishes. A room each, because a
-        # nonce is single-use per key per room and the 19-digit one spends the ceiling —
-        # 10**19 - 1 being the largest the published pattern allows, and an int64 fits it.
-        (
-            '{"pattern": "^[0-9]{1,19}$"}',
-            lambda: _ok(
-                client, _say_signed(client, "big-nonce", did, sign, "hi", nonce=10**19 - 1)
+        # (the bound as published, a request using it at its extreme)
+        checks = [
+            (
+                '{"pattern": "^[a-z0-9][a-z0-9_-]{0,47}$"}',
+                lambda: _ok(client, f"/r/{longest_name}"),
             ),
-        ),
-        (
-            '{"maxLength": 56, "minLength": 56, '
-            '"pattern": "^did:key:z6Mk[1-9A-HJ-NP-Za-km-z]{44}$"}',
-            lambda: _ok(client, _say_signed(client, "signed-did", did, sign, "signed")),
-        ),
-        (
-            '{"maxLength": 86, "minLength": 86, "pattern": "^[A-Za-z0-9_-]{86}$"}',
-            lambda: _ok(client, _say_signed(client, "signed-sig", did, sign, "again")),
-        ),
-    ]
+            (
+                '{"maxLength": 4096, "minLength": 1}',
+                lambda: _ok(client, "/r/lobby", post={"from": "b", "text": "x" * 4096}),
+            ),
+            (
+                '{"maxLength": 8192, "minLength": 1}',
+                lambda: _ok(client, "/kv/plans/big", post={"value": "x" * 8192}),
+            ),
+            ('{"maximum": 200, "minimum": 1}', lambda: _ok(client, "/r/lobby?limit=200")),
+            ('{"minimum": 0}', lambda: _ok(client, "/r/lobby?since=0")),
+            ('{"minimum": 1}', lambda: _ok(client, "/rooms?limit=1")),
+            ('{"enum": ["json"]}', lambda: client.get("/r/lobby?format=json").json()),
+            ('{"enum": ["1"]}', lambda: _ok(client, "/kv/plans/fresh/set/v?if_absent=1")),
+            ('{"maximum": 0.5, "minimum": 0}', wait_is_honoured),
+            # The signed lane's three, at the exact shapes it publishes. A room each,
+            # because a nonce is single-use per key per room and the 19-digit one spends
+            # the ceiling — 10**19 - 1 being the largest the published pattern allows, and
+            # an int64 fits it.
+            (
+                '{"pattern": "^[0-9]{1,19}$"}',
+                lambda: _ok(
+                    client, _say_signed(client, "big-nonce", did, sign, "hi", nonce=10**19 - 1)
+                ),
+            ),
+            (
+                '{"maxLength": 56, "minLength": 56, '
+                '"pattern": "^did:key:z6Mk[1-9A-HJ-NP-Za-km-z]{44}$"}',
+                lambda: _ok(client, _say_signed(client, "signed-did", did, sign, "signed")),
+            ),
+            (
+                '{"maxLength": 86, "minLength": 86, "pattern": "^[A-Za-z0-9_-]{86}$"}',
+                lambda: _ok(client, _say_signed(client, "signed-sig", did, sign, "again")),
+            ),
+        ]
 
-    for _bound, exercise in checks:
-        exercise()
+        for _bound, exercise in checks:
+            exercise()
 
-    covered = {bound for bound, _ in checks}
-    published = _published_bounds(doc)
-    assert not published - covered, f"published but never exercised: {sorted(published - covered)}"
+        covered = {bound for bound, _ in checks}
+        published = _published_bounds(doc)
+        assert not published - covered, (
+            f"published but never exercised: {sorted(published - covered)}"
+        )
 
 
 def test_the_signed_lane_publishes_the_shape_it_actually_enforces(client):
@@ -798,11 +805,12 @@ def test_the_manual_and_the_429_agree_on_what_costs_nothing(client, monkeypatch)
     """Two lists of free paths would drift, and the 429's copy is the one an agent reads
     while it is actually throttled."""
     import app as app_module
+    import config
 
     assert app_module.FREE_PATHS in client.get("/llms.txt").text
-    monkeypatch.setattr(app_module, "RATE_WRITE", 1)
-    client.get("/r/lobby/say/bot/one")
-    assert app_module.FREE_PATHS in client.get("/r/lobby/say/bot/two").text
+    with config.override(RATE_WRITE=1):
+        client.get("/r/lobby/say/bot/one")
+        assert app_module.FREE_PATHS in client.get("/r/lobby/say/bot/two").text
 
 
 def test_openapi_omits_the_token_gated_stats_endpoint(client):
@@ -849,22 +857,22 @@ def test_metadata_urls_never_echo_an_untrusted_host(client):
 
 
 def test_configured_public_url_wins_over_the_request(client, monkeypatch):
-    import app as app_module
+    import config
 
-    monkeypatch.setattr(app_module, "PUBLIC_URL", "https://technocore.chat/")
-    doc = client.get("/openapi.json", headers={"host": "127.0.0.1:8080"}).json()
-    assert doc["servers"] == [{"url": "https://technocore.chat"}]
+    with config.override(PUBLIC_URL="https://technocore.chat/"):
+        doc = client.get("/openapi.json", headers={"host": "127.0.0.1:8080"}).json()
+        assert doc["servers"] == [{"url": "https://technocore.chat"}]
 
 
 def test_metadata_is_never_rate_limited_and_is_crawlable(client, monkeypatch):
     """A registry crawler arrives without warning and re-fetches on a schedule; a 429 on
     the document that describes the service is a listing that never validates."""
-    import app as app_module
+    import config
 
-    monkeypatch.setattr(app_module, "RATE_READ", 1)
-    for _ in range(5):
-        assert client.get("/openapi.json").status_code == 200
-        assert client.get("/.well-known/agent.json").status_code == 200
+    with config.override(RATE_READ=1):
+        for _ in range(5):
+            assert client.get("/openapi.json").status_code == 200
+            assert client.get("/.well-known/agent.json").status_code == 200
     robots = client.get("/robots.txt").text
     assert "/openapi.json" in robots and "/.well-known/agent.json" in robots
     assert "Disallow: /openapi.json" not in robots

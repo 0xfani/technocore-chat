@@ -16,6 +16,13 @@ reported under an "extra" label and never counted in the core total. Two numbers
 tokens/line is the anti-golf metric: a code-line count held down by stripping names and
 packing statements shows up here. Stdlib ast + tokenize only.
 
+Per-file CAPS live beside the baseline in sz-baseline.json ("caps"): the baseline is a
+ratchet that only moves down, the caps are the policy ceiling it ratchets under. --check
+fails on growth past the baseline (naming the cap) and on any value past its cap even
+when the baseline was raised to match; --caps prints the table against the caps. Every
+core label and core_total must have a cap — a missing entry is an error in the enforcing
+modes, not an exemption, so a file added to CORE_FILES cannot slip past the policy.
+
 Counting rules: a triple-quoted string literal is one token starting at one line, so an
 embedded prose document (app.py's MANUAL) counts as ~1 code line by design — embedded
 docs are effectively extra, and extracting one into a file will barely move code-lines.
@@ -111,15 +118,26 @@ def main():
     parser.add_argument(
         "--update-baseline", action="store_true", help="rewrite sz-baseline.json from the tree"
     )
+    parser.add_argument(
+        "--caps",
+        action="store_true",
+        help="print code-lines against the per-file caps (fails on any breach)",
+    )
     args = parser.parse_args()
 
     root = Path(__file__).resolve().parent
     files = measure_all(root)
     core_total = sum(v["code_lines"] for k, v in files.items() if k.startswith("core/"))
-
+    # {} rather than None when unneeded: every branch that subscripts baseline is guarded
+    # by the flag that loaded it, and a dict default keeps that local invariant legible.
+    baseline = json.loads(BASELINE.read_text(encoding="utf-8")) if args.check or args.caps else {}
+    # The caps are policy, not measurement: a baseline rewrite must carry them forward
+    # untouched, or --update-baseline would silently delete the ceiling it ratchets under.
+    caps = baseline.get("caps", {})
     if args.update_baseline:
+        caps = caps or json.loads(BASELINE.read_text(encoding="utf-8")).get("caps", {})
         BASELINE.write_text(
-            json.dumps({"core_total": core_total, "files": files}, indent=2) + "\n",
+            json.dumps({"core_total": core_total, "caps": caps, "files": files}, indent=2) + "\n",
             encoding="utf-8",
         )
         print(f"baseline written: core code-lines = {core_total}")
@@ -133,8 +151,50 @@ def main():
         )
     print(f"{'core total (code)':<24} {'':>6} {core_total:>6}")
 
+    if args.check or args.caps:
+        # A core label missing from caps is a policy hole, not an exemption: a file added
+        # to CORE_FILES without a cap entry would sit outside the per-file policy
+        # entirely, its growth visible only to the (looser) aggregate — and a missing
+        # core_total cap disables even that. Adding a core file means deciding its cap,
+        # so the enforcing modes refuse to run until the table covers everything.
+        missing = [label for label in files if label.startswith("core/") and label not in caps]
+        if "core_total" not in caps:
+            missing.append("core_total")
+        if missing:
+            print(f"caps missing from sz-baseline.json: {', '.join(missing)}", file=sys.stderr)
+            return 1
+        # Past a cap is past a cap even when the baseline was raised to match: the
+        # ratchet may only move down. This is the guard against --update-baseline
+        # absorbing growth the caps exist to force a decision about.
+        over = [
+            label
+            for label, m in files.items()
+            if label.startswith("core/") and m["code_lines"] > caps[label]
+        ]
+        if core_total > caps["core_total"]:
+            over.append("core_total")
+
+    if args.caps:
+        print()
+        print(f"{'file':<24} {'code':>6} {'cap':>6} {'headroom':>9}")
+        for label, m in files.items():
+            cap = caps.get(label)
+            shown = "-" if cap is None else str(cap)
+            room = "" if cap is None else f"{cap - m['code_lines']:>9}"
+            print(f"{label:<24} {m['code_lines']:>6} {shown:>6} {room}")
+        total_cap = caps.get("core_total")
+        print(
+            f"{'core total (code)':<24} {core_total:>6} {total_cap:>6} {total_cap - core_total:>9}"
+        )
+        if over:
+            detail = ", ".join(
+                f"{o} {files[o]['code_lines'] if o in files else core_total} > cap {caps.get(o)}"
+                for o in over
+            )
+            print(f"core code-lines past cap: {detail}", file=sys.stderr)
+            return 1
+
     if args.check:
-        baseline = json.loads(BASELINE.read_text(encoding="utf-8"))
         grown = [
             label
             for label, m in files.items()
@@ -144,15 +204,24 @@ def main():
         if grown:
             detail = ", ".join(
                 f"{g} {baseline['files'][g]['code_lines']} -> {files[g]['code_lines']}"
+                f" (cap {caps[g]})"
                 for g in grown
             )
             print(f"core code-lines grew vs sz-baseline.json: {detail}", file=sys.stderr)
             return 1
         if core_total > baseline["core_total"]:
             print(
-                f"core total grew vs baseline: {baseline['core_total']} -> {core_total}",
+                f"core total grew vs baseline: {baseline['core_total']} -> {core_total}"
+                f" (cap {caps['core_total']})",
                 file=sys.stderr,
             )
+            return 1
+        if over:
+            detail = ", ".join(
+                f"{o} {files[o]['code_lines'] if o in files else core_total} > cap {caps.get(o)}"
+                for o in over
+            )
+            print(f"core code-lines past cap: {detail}", file=sys.stderr)
             return 1
         print(f"check ok: core code-lines <= baseline ({baseline['core_total']})")
     return 0

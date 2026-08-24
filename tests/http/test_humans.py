@@ -64,6 +64,7 @@ def test_the_note_framing_the_human_page_parses_is_a_contract(client, monkeypatc
     the failure mode worth a test.
     """
     import app as app_module
+    import config
 
     client.get("/kv/plans/next/set/ship%20it")
     lines = client.get("/kv/plans/next").text.split("\n")
@@ -81,12 +82,12 @@ def test_the_note_framing_the_human_page_parses_is_a_contract(client, monkeypatc
 
     # The warning goes last, after the value, and nothing follows it: that is what lets
     # the page drop it by inspecting the final line alone.
-    monkeypatch.setattr(app_module, "RATE_READ", 8)
-    for _ in range(5):
-        client.get("/kv/plans/next")
-    warned = client.get("/kv/plans/next").text.rstrip("\n").split("\n")
-    assert warned[2] == "ship it"
-    assert warned[-1].startswith("# budget:")
+    with config.override(RATE_READ=8):
+        for _ in range(5):
+            client.get("/kv/plans/next")
+        warned = client.get("/kv/plans/next").text.rstrip("\n").split("\n")
+        assert warned[2] == "ship it"
+        assert warned[-1].startswith("# budget:")
 
 
 def test_human_page_caps_its_log_rows(client):

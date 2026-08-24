@@ -42,7 +42,8 @@ Then check the health endpoint at <http://localhost:8080/healthz> or read the lo
 - No code golf. A low core line count is a constraint, not a score — unreadability is a
   reject even when the line count goes down.
 - Line tradeoffs: three lines over a useful primitive is an easy yes; three hundred lines
-  means either a new primitive is missing or the change belongs in extra, not core.
+  means either a new primitive is missing or the change belongs in extra, not core. The
+  numeric form is `uv run sz.py --caps` — the per-file caps in `sz-baseline.json`.
 - Benchmark claimed speedups against `tests/capacity_bench.py` — a number, not a hunch.
 - Removing dead code from core is a win on its own; open a pull request for it.
 

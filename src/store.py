@@ -318,6 +318,7 @@ def _locked(target: Path):
     lock = target.with_suffix(target.suffix + ".lock")
     with open(lock, "a+b") as lf:
         fcntl.flock(lf, fcntl.LOCK_EX)
+        config._dbg(2, "flock", path=target.name)
         try:
             yield
         finally:
@@ -788,6 +789,7 @@ def _reap(root: Path) -> None:
                     reason = _reapable(p, now, stillborn_rule)
                     if reason:
                         p.unlink(missing_ok=True)
+                        config._dbg(2, "reap", room=p.name, reason=reason)
                         if stillborn_rule:
                             reaped[f"reaped_{reason}"] += 1
             except OSError:
@@ -1262,6 +1264,7 @@ def _compact(path: Path, cutoff: float | None = None, keep: int = COMPACT_KEEP_B
         f.flush()
         os.fsync(f.fileno())
     os.replace(tmp, path)
+    config._dbg(2, "compact", room=path.name, kept=len(kept), bytes=total)
 
 
 def note_set(
@@ -1296,8 +1299,10 @@ def note_set(
         if expect_absent or expect is not None:
             current = path.read_text(encoding="utf-8") if path.exists() else None
             if expect_absent and current is not None:
+                config._dbg(2, "cas_conflict", ns=ns, key=key, found="exists")
                 raise StoreConflictError(f"note {ns}/{key} already exists", current)
             if expect is not None and current != expect:
+                config._dbg(2, "cas_conflict", ns=ns, key=key, found="changed")
                 raise StoreConflictError(f"note {ns}/{key} changed since you read it", current)
         tmp = path.with_suffix(".tmp")
         tmp.write_text(value, encoding="utf-8")
