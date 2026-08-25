@@ -25,9 +25,10 @@ clients depend on tightens.
 ### Changed
 
 - **Global note cap 40960 → 163840** (`32 * MAX_ROOMS`, was `8 * MAX_ROOMS`), so the store holds
-  the ~100k sharded identity notes it is being asked to. Worst-case note disk goes 320 MiB → 1.25
-  GiB against the unchanged 5 GiB room budget, so a volume sized for rooms still covers it; the
-  per-namespace cap (5120) and every route and response shape are unchanged.
+  the ~100k sharded identity notes it is being asked to. Worst-case note disk goes 1.25 GiB →
+  5 GiB (the 8192-char value cap counts code points, up to 4 UTF-8 bytes each), so **provision
+  10 GiB** against the caps where the previous worst case was 6.25 GiB; all-ASCII notes total
+  1.25 GiB. The per-namespace cap (5120) and every route and response shape are unchanged.
 
 ### Fixed
 

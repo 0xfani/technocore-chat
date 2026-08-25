@@ -191,21 +191,27 @@ def test_the_global_cap_is_sized_against_the_disk_it_costs(tmp_path) -> None:
     MAX_NOTES_TOTAL went 8 * MAX_ROOMS -> 32 * MAX_ROOMS to hold ~100k identity notes. What
     makes that affordable is stated in the source as a worst case, and a worst case nobody
     recomputes is how a cap gets raised past the volume it was sized for. Both halves are
-    asserted: the reserved-namespace floor it must stay above, and the disk ceiling it must
-    stay under.
+    asserted: the reserved-namespace floor it must stay above, and the disk ceiling it
+    costs.
+
+    In bytes, not characters — the first version of this test multiplied the cap by
+    MAX_VALUE_CHARS and called it the worst case, but that constant caps code points and
+    notes are stored as UTF-8, where a code point is up to 4 bytes. The conflation
+    understated the hostile ceiling 4x (PR #151 review).
     """
     import store
 
     reserved = (store.TOPIC_NS, store.OWNERS_NS, store.ALLOW_NS, store.NONCE_NS)
     assert store.MAX_NOTES_TOTAL >= len(reserved) * store.MAX_ROOMS, "reserved floor"
 
-    worst_case = store.MAX_NOTES_TOTAL * store.MAX_VALUE_CHARS
-    assert worst_case == 1342177280, f"1.25 GiB is the documented figure, got {worst_case}"
-    # Notes and rooms share one volume, and the room budget is the number a deployment is
-    # told to provision. Notes at a quarter of it is the trade the comment argues for; a
-    # note cap that outgrew the room budget would be a re-provisioning, not a constant.
-    assert worst_case < store.MAX_TOTAL_ROOM_BYTES
-    assert worst_case * 4 == store.MAX_TOTAL_ROOM_BYTES, "notes = a quarter of the rooms"
+    ascii_case = store.MAX_NOTES_TOTAL * store.MAX_VALUE_CHARS  # 1 byte per code point
+    assert ascii_case == 1342177280, f"1.25 GiB is the documented ASCII figure, got {ascii_case}"
+    # The ceiling an operator provisions against: every slot filled with 4-byte UTF-8.
+    # Equal to the room budget by arithmetic, not design — the two documented figures a
+    # deployment adds up are this and MAX_TOTAL_ROOM_BYTES, and this pin is what forces the
+    # next cap raise to redo that sum (docs state rooms + notes = 10 GiB worst case).
+    worst_case = ascii_case * 4
+    assert worst_case == store.MAX_TOTAL_ROOM_BYTES, "notes ceiling = the room budget"
 
 
 def test_the_refusal_still_fires_at_the_global_cap(tmp_path, monkeypatch) -> None:

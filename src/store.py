@@ -162,10 +162,19 @@ MAX_NOTES_PER_NS = MAX_ROOMS
 # 3 * MAX_ROOMS = 15,360 and identity alone would have overrun it six times over.
 #
 # Affordable because a note is small and individually capped, so the worst case multiplies
-# out rather than being guessed at: 163,840 * MAX_VALUE_CHARS = 1.25 GiB, against the 5 GiB
-# MAX_TOTAL_ROOM_BYTES a deployment already provisions for rooms. Notes go from a 16th of
-# that budget to a quarter of it — a volume sized for the rooms still covers it, which is
-# why this is a constant change and not a re-provisioning.
+# out rather than being guessed at — in BYTES, not characters, because MAX_VALUE_CHARS caps
+# code points (clean_text counts a str's length) and note_set stores UTF-8, where a code
+# point is up to 4 bytes. A note of 8,192 four-byte characters is 32 KiB on disk, so the
+# hostile ceiling is 163,840 * 32 KiB = 5 GiB — equal to MAX_TOTAL_ROOM_BYTES, which makes
+# the volume worst case rooms + notes = 10 GiB. All-ASCII notes (which is what identity
+# notes are) put the same count at 1.25 GiB. Before this raise the same arithmetic gave a
+# 1.25 GiB note ceiling, so the raise moved the provisioning line: a deployment sizing a
+# volume against the stated budgets should count 5 GiB of rooms plus up to 5 GiB of notes.
+#
+# Capping stored *bytes* instead would pin the ceiling at 1.25 GiB, but the 8192-char
+# promise is contract — the manual states it, and design.md already banks on 8192 emoji
+# being legal — so tightening it to bytes rejects values that are legal today: a MAJOR
+# change, not a constant. The count cap plus the per-value char cap is what bounds disk.
 #
 # Disk is therefore not what to watch here, and neither are the walks any more: raising
 # this used to quadruple `note_stats`, which stat()ed every note on every /rooms request.
