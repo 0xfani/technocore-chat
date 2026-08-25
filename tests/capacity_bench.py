@@ -84,27 +84,22 @@ shape it was reading as flat is a line:
     room_stats(limit=50)  6.61 ms -> 5.14 ms   memoizing `_listable`; the walk is now within
                                                a sixth of its floor of one stat() per room
 
-Measured 2026-08-25 for 0.9.3, same container (tmpfs). The signed-write section builds
-its own room and ignores --scale, so these do not move with the caps:
+Measured 2026-08-25 for 0.9.3, same container (tmpfs). The signed-write section builds its
+own room and ignores --scale, so these do not move with the caps:
 
-  per _last_nonce call, 8,255 records of 196 B (the lobby shape at the time), of which
-  READ_BUDGET covers ~5,300:
+  per _last_nonce call, 8,255 records of 196 B, of which READ_BUDGET covers ~5,300:
                                   scan-only   parse every   bytes reject
     DID absent from the window       0.8 ms        3.9 ms         2.2 ms   1.8x
-    DID posted 3 records ago             n/a       ~0 ms          ~0 ms    unchanged
+    DID posted 3 records ago             n/a       ~0 ms          ~0 ms
     DID quoted in every record       0.8 ms        3.9 ms         5.9 ms   0.6x
-    `scan-only` is reverse_lines with no parse at all, so it is the floor the pre-filter
-    cannot remove: the absent-DID case went from over 5x that floor to under 3x. The
-    early-hit row is below this printer's resolution either way — a hit 3 records in never
-    scanned anything. The last row is the adversarial shape and the one regression: a room
-    where every line quotes the DID being looked up makes every byte match a false positive,
-    so the substring test is pure overhead on top of the parse it was already doing.
+    scan-only is reverse_lines with no parse: the floor. The absent-DID case went from
+    over 5x it to under 3x. The last row is the adversarial shape — every line a false
+    positive, so the filter is pure overhead on top of the parse.
 
-  Under cProfile the absent-DID case reads (shares, not ms — cProfile inflates the totals):
+  Under cProfile the absent-DID case (shares, not ms — cProfile inflates totals):
     parse every    26% _parse · 23% the scan loop · 21% orjson.loads · 11% dict.get
     bytes reject   63% the scan loop · 17% reverse_lines · 14% bytes.split · 3% read
-  The parse leaves the profile entirely and what remains is reading the window. Getting
-  under that means scanning fewer bytes, not parsing less.
+  The parse leaves the profile; what remains is reading the window.
 
 The two numbers worth watching are the last pair. A sync handler costs the loop nothing
 because Starlette runs it in a threadpool; an `async def` handler that calls blocking store
@@ -200,8 +195,7 @@ def store_bench(root: Path) -> None:
 
 
 def _did(i: int) -> str:
-    """A distinct, real did:key. The byte scan only cares about length and alphabet, but a
-    benchmark measuring a shape the verifier would reject is measuring nothing."""
+    """A distinct, real did:key — a shape the verifier would reject measures nothing."""
     n = int.from_bytes(didkey.MULTICODEC_ED25519 + i.to_bytes(4, "big") + b"\x00" * 28)
     out = ""
     while n:
@@ -211,9 +205,9 @@ def _did(i: int) -> str:
 
 
 def _build_nonce_room(root: Path, room: str, records: int, mention: str | None = None) -> Path:
-    """One signed record per distinct DID — the traffic shape that makes the nonce scan
-    expensive. `mention` quotes one DID in every record's *text*, which is legal, is not
-    that DID's nonce, and is the case a bytes-level pre-filter matches wrongly."""
+    """One signed record per distinct DID — the shape that makes the nonce scan expensive.
+    `mention` quotes a DID in every record's *text*: legal, not that DID's nonce, and the
+    case a bytes-level pre-filter matches wrongly."""
     path = store.room_path(root, room)
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("wb") as f:
@@ -225,8 +219,8 @@ def _build_nonce_room(root: Path, room: str, records: int, mention: str | None =
 
 
 def _parse_every(root: Path, room: str, did: str) -> int | None:
-    """`_last_nonce` before the bytes-level reject: json-parses every record it scans. Kept
-    here rather than in git history, because a baseline nobody can run stops being run."""
+    """`_last_nonce` before the bytes-level reject. Kept here because a baseline that only
+    exists in git history stops being run."""
     with store.room_path(root, room).open("rb") as f:
         for raw in store.reverse_lines(f):
             rec = store._parse(raw)
@@ -243,11 +237,10 @@ def _scan_only(root: Path, room: str) -> None:
 
 
 def nonce_bench(root: Path, records: int) -> None:
-    """`_last_nonce` is a predicate scan, not a tail read: it wants the newest record whose
-    `from` is one DID, so a DID that has NOT posted lately costs the whole READ_BUDGET —
-    and that is the common case (lobby: 826 signed writes/min from 770 distinct DIDs into
-    a window holding ~5,400 records). It runs under the room lock, so it is serialised into
-    every signed write. Both loops are timed over one file, so only the loop differs."""
+    """A predicate scan, not a tail read: a DID that has NOT posted lately costs the whole
+    READ_BUDGET, which is the common case (lobby: 826 signed writes/min, 770 distinct DIDs,
+    a ~5,400-record window). It holds the room lock, so every signed write pays it. Both
+    loops run over one file, so only the loop differs."""
     room, absent = "nonce-bench", _did(records + 5_000)
     path = _build_nonce_room(root, room, records)
     size = path.stat().st_size
@@ -265,9 +258,8 @@ def nonce_bench(root: Path, records: int) -> None:
     bench("recent DID  parse every record", lambda: _parse_every(root, room, recent), rounds=200)
     bench("recent DID  bytes reject first", lambda: store._last_nonce(root, room, recent), 200)
 
-    # The adversarial shape: every line quotes the DID being looked up, so every byte match
-    # is a false positive and the filter is pure overhead on top of the parse. A few ms,
-    # bounded by the same budget — measured here rather than left to be discovered.
+    # The adversarial shape: every line quotes the DID looked up, so every match is a false
+    # positive and the filter is pure overhead. Bounded by the same budget, but measured.
     quoted = _did(7_777_777)
     _build_nonce_room(root, room, records, mention=quoted)
     assert store._last_nonce(root, room, quoted) is None  # a mention is not a `from`

@@ -1442,7 +1442,10 @@ def _last_nonce(root: Path, room: str, did: str) -> int | None:
     # what this buys — to cover files this store did not write, so it stays out of the loop.
     did_b = did.encode()
     with path.open("rb") as f:
-        for rec in (_parse(r) for r in reverse_lines(f) if did_b in r):
+        for raw in reverse_lines(f):
+            if did_b not in raw:
+                continue
+            rec = _parse(raw)
             if rec is not None and rec.get("from") == did and isinstance(rec.get("nonce"), int):
                 return rec["nonce"]
     return None
