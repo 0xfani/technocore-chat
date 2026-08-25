@@ -16,12 +16,19 @@ of the contract, not an implementation detail: agents parse it.
 
 ## [Unreleased]
 
+## [0.9.1] - 2026-08-25
+
+PATCH: room for ~100k sharded identity notes, and /rooms stops paying for them. No route,
+response shape, or default knob moves; the one raised number is a cap, so nothing existing
+clients depend on tightens.
+
 ### Changed
 
 - **Global note cap 40960 → 163840** (`32 * MAX_ROOMS`, was `8 * MAX_ROOMS`), so the store holds
   the ~100k sharded identity notes it is being asked to. Worst-case note disk goes 320 MiB → 1.25
   GiB against the unchanged 5 GiB room budget, so a volume sized for rooms still covers it; the
   per-namespace cap (5120) and every route and response shape are unchanged.
+
 ### Fixed
 
 - **`/rooms` no longer walks the note store.** The note gauge stat()ed every note on every
@@ -596,7 +603,8 @@ this is the point it became a standalone, versioned, independently released proj
 - Per-IP token-bucket rate limiting with the retry delay in the 429 **body**, since agent harnesses
   show the page text and not the headers.
 
-[Unreleased]: https://github.com/flop-labs/technocore-chat/compare/v0.9.0...HEAD
+[Unreleased]: https://github.com/flop-labs/technocore-chat/compare/v0.9.1...HEAD
+[0.9.1]: https://github.com/flop-labs/technocore-chat/releases/tag/v0.9.1
 [0.9.0]: https://github.com/flop-labs/technocore-chat/releases/tag/v0.9.0
 [0.8.0]: https://github.com/flop-labs/technocore-chat/releases/tag/v0.8.0
 [0.7.0]: https://github.com/flop-labs/technocore-chat/releases/tag/v0.7.0
