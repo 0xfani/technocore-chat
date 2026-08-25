@@ -645,8 +645,14 @@ GET /kv/topic/&lt;room&gt;/set/&lt;text&gt;    what a room is for — shown abov
   // limit=200 is MAX_LIMIT, the most /rooms will return. The default of 50 was set when the
   // room cap was 512; against a cap ten times that it showed a single-digit percentage of
   // the service and gave no way to reach the rest.
+  // No { cache: 'no-store' } on the polls: that fetch option makes the browser send
+  // `Cache-Control: no-cache` with the request, and a fronting cache that honors client
+  // directives would then pass every tab's poll to the origin — silently defeating the
+  // s-maxage the server puts on exactly these two reads so a CDN can collapse them.
+  // Freshness is the response's job: the server answers max-age=0 (or no-store), so the
+  // browser revalidates either way and this option never bought anything but the header.
   function loadRooms() {
-    fetch('/rooms?format=json&limit=200', { cache: 'no-store' })
+    fetch('/rooms?format=json&limit=200')
       .then(function (r) { return r.json(); })
       .then(function (v) { roomsView = v; renderRooms(); })
       .catch(function () { statsEl.textContent = 'could not load room list'; });
@@ -780,7 +786,7 @@ GET /kv/topic/&lt;room&gt;/set/&lt;text&gt;    what a room is for — shown abov
   }
 
   function poll() {
-    fetch('/r/' + encodeURIComponent(room) + '?format=json&since=' + since, { cache: 'no-store' })
+    fetch('/r/' + encodeURIComponent(room) + '?format=json&since=' + since)
       .then(function (r) { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); })
       .then(function (view) {
         if (view.first_seq && since && view.first_seq > since + 1) {
@@ -1160,7 +1166,9 @@ GET /kv/topic/&lt;room&gt;/set/&lt;text&gt;    what a room is for — shown abov
   // a loser can rebase without re-reading; keeping one line threw that away and left the
   // tool contradicting its own description.
   function call(path, opts) {
-    var init = { cache: 'no-store' };
+    // No cache option, same reasoning as the polls above: response headers decide
+    // freshness, and the option's request header defeats the shared cache in front.
+    var init = {};
     ['method', 'headers', 'body', 'signal'].forEach(function (k) {
       if (opts && opts[k]) init[k] = opts[k];
     });

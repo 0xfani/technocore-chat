@@ -864,10 +864,16 @@ def test_note_capacity_walk_is_cached_and_a_note_write_invalidates_it(client, mo
         assert len(calls) == 2, "a note write must invalidate the cached walk"
         assert "# notes 1 of" in body  # and the writer sees their own note counted
 
+        # The stamp is the on-disk notes_written counter, not process state: a write that
+        # never touched this process's handlers — another uvicorn worker — invalidates too.
+        app_module.store.note_set(config.ROOT, "plans", "later", "v")
+        assert "# notes 2 of" in client.get("/rooms").text
+        assert len(calls) == 3
+
     with config.override(ROOMS_CACHE_SECONDS=0, NOTE_STATS_CACHE_SECONDS=0):
         client.get("/rooms")
         client.get("/rooms")
-        assert len(calls) == 4  # 0 disables reuse entirely
+        assert len(calls) == 5  # 0 disables reuse entirely
 
 
 def test_polled_reads_are_edge_cacheable_and_held_or_write_replies_never_are(client):

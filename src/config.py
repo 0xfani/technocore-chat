@@ -58,9 +58,10 @@ ROOMS_CACHE_SECONDS = float(os.environ.get("CHAT_ROOMS_CACHE_SECONDS", "3"))
 # the note-capacity line stats every note file — ~41k at the cap, an order of magnitude
 # more filesystem work than everything else /rooms does combined — to produce two
 # integers that a message write never changes. Measured on a production-shaped store the
-# note walk was 91% of an uncached /rooms. A note write still invalidates immediately
-# (the cache is generation-stamped, not merely timed), so the only staleness this buys is
-# reaper deletions surfacing up to this many seconds late in an aggregate gauge. 0 disables.
+# note walk was 91% of an uncached /rooms. A note write still invalidates immediately —
+# the cache is stamped with the on-disk notes_written counter, not merely timed, so it
+# holds across worker processes — and the only staleness this buys is reaper deletions
+# surfacing up to this many seconds late in an aggregate gauge. 0 disables.
 NOTE_STATS_CACHE_SECONDS = float(os.environ.get("CHAT_NOTE_STATS_CACHE_SECONDS", "30"))
 # `s-maxage` stamped on the world-readable hot reads (/rooms and plain room reads) so a
 # CDN can collapse a poll storm — /humans refreshes /rooms every 5s per open tab — into

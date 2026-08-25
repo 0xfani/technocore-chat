@@ -170,8 +170,9 @@ def take(request, kind, per_min, burst=None) -> tuple[int, float]:
     # And the /rooms cache is dropped here. This is the fast path, not the guarantee: it
     # runs *before* the store write, so on its own it loses the race against a concurrent
     # reader that walks while the writer is still in fsync. `_rooms_stamp` is what closes
-    # that; this clear is kept because it costs nothing and covers what the stamp cannot —
-    # note writes, which change the notes line and the topics shown beside a room.
+    # that — for note writes too, now that notes_written is one of the counters it reads.
+    # The clear is kept because it costs nothing and serves the common case without
+    # waiting out a stamp comparison.
     if kind == "write":
         _rooms_cache.clear()
     return left, wait
@@ -604,41 +605,34 @@ def _rooms_stamp() -> tuple:
     newer than the data the walk sees. A stale entry is therefore always detected, whatever
     order the two requests interleaved in.
 
-    The clear in `take` stays because it is free and catches what the counters do not —
-    note writes, which change the notes line and the topics shown beside a room.
+    Note writes are covered too: notes_written is one of the counters, so a topic set
+    beside a room invalidates the view that renders it, from any worker process.
     """
     counted = store.counters(config.ROOT)
     return tuple(counted[key] for key in store.COUNTER_KEYS)
 
 
 # One entry, not per-limit: the note walk does not depend on `limit`. The stamp carries
-# ROOT (tests re-point it per test) and a generation the note handlers bump *after* a
-# write lands — the same ordering argument as _rooms_stamp: a walk that raced a note
-# write caches under the pre-write generation, so it can never be served after the bump.
+# ROOT (tests re-point it per test) and the on-disk notes_written counter, which
+# store.note_set bumps *after* a write lands — the same ordering argument as _rooms_stamp
+# (a walk that raced a note write caches under the pre-write value, so it can never be
+# served after the bump), and the same file every worker process reads, so a sibling
+# uvicorn worker's write invalidates this one's cache too.
 _note_stats_cache: tuple[tuple, float, dict] | None = None
-_notes_gen = 0
-
-
-def _bump_notes_gen() -> None:
-    """Called by every note-writing handler once store.note_set has succeeded. This is
-    what lets NOTE_STATS_CACHE_SECONDS be long: the clock only bounds what no handler
-    announces — reaper deletions, and the nonce sidecar a signed claim creates."""
-    global _notes_gen
-    _notes_gen += 1
 
 
 def _note_stats() -> dict:
     """store.note_stats through its own cache.
 
-    Its own cache rather than a ride on _rooms_cache because the two invalidate on
-    different events at very different rates: the rooms walk is stale on every message
-    anywhere (the stamp watches the message counter — that is the own-writes guarantee),
-    while the note gauge changes only when a note is written or reaped. Fused, the 41k-stat
-    note walk was re-run on every message; split, a /rooms miss costs only the O(shown)
-    room walk.
+    Its own cache rather than a ride on _rooms_cache because the two invalidate at very
+    different rates: the rooms walk is stale on every message anywhere (that is the
+    own-writes guarantee), while the note gauge changes only when a note is written or
+    reaped. Fused, the 41k-stat note walk was re-run on every message; split, a /rooms
+    miss costs only the O(shown) room walk. The clock only bounds what no counter
+    announces — reaper deletions of idle notes.
     """
     global _note_stats_cache
-    stamp = (_notes_gen, config.ROOT)
+    stamp = (store.counters(config.ROOT)["notes_written"], config.ROOT)
     now = time.monotonic()
     hit = _note_stats_cache
     if config.NOTE_STATS_CACHE_SECONDS > 0 and hit and hit[0] == stamp and now < hit[1]:
@@ -1241,7 +1235,6 @@ def note_write(request: Request) -> Response:
     meta = store.note_set(
         config.ROOT, p["ns"], p["key"], value, expect=expect, expect_absent=expect_absent
     )
-    _bump_notes_gen()
     return respond(
         request,
         meta,
@@ -1297,7 +1290,6 @@ def note_write_signed(request: Request) -> Response:
         return denied
     expect, expect_absent = _condition(dict(request.query_params))
     meta = store.note_set(config.ROOT, ns, key, value, expect=expect, expect_absent=expect_absent)
-    _bump_notes_gen()
     return respond(
         request,
         meta,
@@ -1343,7 +1335,6 @@ async def note_post(request: Request) -> Response:
         meta = store.note_set(
             config.ROOT, ns, key, value, expect=expect, expect_absent=expect_absent
         )
-        _bump_notes_gen()
         return respond(
             request,
             meta,

@@ -106,7 +106,7 @@ EVENTS_NICK = "server"
 # files. Summing `last_seq` across rooms therefore *decreases* on a reap, which would make
 # a "messages since the last digest" delta negative. These four only ever go up.
 COUNTERS_FILE = ".counters"
-COUNTER_KEYS = ("messages", "rooms_created", "reaped_idle", "reaped_stillborn")
+COUNTER_KEYS = ("messages", "rooms_created", "reaped_idle", "reaped_stillborn", "notes_written")
 # Periodic aggregate samples, so growth over a window is answerable at all: the counters
 # above say what the totals are *now*, and nothing but a stored history says what they were
 # a day ago. Kept here rather than in the reader because the service is the only thing that
@@ -1309,6 +1309,10 @@ def note_set(
         tmp = path.with_suffix(".tmp")
         tmp.write_text(value, encoding="utf-8")
         os.replace(tmp, path)
+    # After the write is on disk, like append's bump: the counter is what invalidates the
+    # note-stats cache in app.py, and it lives in a file so every worker process sees it —
+    # a process-local generation would leave a sibling worker serving pre-write counts.
+    _bump(root, notes_written=1)
     return {"ns": ns, "key": key, "bytes": len(value.encode()), "ts": _now()}
 
 
