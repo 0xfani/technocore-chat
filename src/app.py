@@ -674,9 +674,12 @@ def rooms(request: Request) -> Response:
         return limit.limited("read", RATE_READ, retry, text=text, max_wait=MAX_WAIT)
     q = request.query_params
     view = _rooms_view(_cursor(q.get("limit"), 50))
+    n = view["notes"]
+    # Both note caps, for the reason the room head prints both of its own: either can be the
+    # one that refuses the next write, and the per-namespace figure moves per deployment.
     notes_line = (
-        f"# notes {view['notes']['total']} of {view['notes']['capacity']} "
-        f"({_size(view['notes']['bytes'])} total, namespaces not listed)"
+        f"# notes {n['total']} of {n['capacity']} ({_size(n['bytes'])} total, "
+        f"{n['capacity_per_namespace']} per namespace, namespaces not listed)"
     )
     if not view["total"]:
         body = "(no rooms yet — GET /r/<name>/say/<nick>/<text> creates one)\n" + notes_line

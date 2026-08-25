@@ -1182,6 +1182,11 @@ def agent_manifest(
             "new_rooms_per_day_per_ip": rooms_per_day,
             "rooms": store.MAX_ROOMS,
             "notes": store.MAX_NOTES_TOTAL,
+            # The global cap is what a write is refused against; this is what any ONE
+            # namespace may hold, and it is a knob (CHAT_MAX_NOTES_PER_NS) rather than a
+            # constant, so a client that spreads its notes over shards cannot read it off
+            # the room cap the way it could before. Both, because either can be the refusal.
+            "notes_per_namespace": store.MAX_NOTES_PER_NS,
             "room_ring_bytes": store.MAX_ROOM_BYTES,
             # Stated separately from `rooms` because it is a separate cap, not the product
             # of the other two: a new room is refused once total room bytes reach this,

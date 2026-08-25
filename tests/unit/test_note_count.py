@@ -136,9 +136,9 @@ def test_the_global_cap_binds_exactly_under_concurrent_processes(tmp_path) -> No
     """The regression that would actually hurt. Four processes race to create past a small
     cap; the store must end up holding exactly the cap, never one more.
 
-    One namespace per note, so the *global* cap is the one under test — MAX_NOTES_PER_NS is
-    MAX_ROOMS, so workers sharing a namespace hit the per-namespace cap first and the global
-    one is never reached.
+    One namespace per note, so the *global* cap is the one under test — MAX_NOTES_PER_NS
+    defaults to MAX_ROOMS and nothing here sets CHAT_MAX_NOTES_PER_NS, so workers sharing a
+    namespace would hit the per-namespace cap first and the global one is never reached.
 
     An off-by-one here is invisible on a quiet store and shows up as a breached cap under
     exactly the load the cap exists for, so it is worth the process spawns.
@@ -212,6 +212,37 @@ def test_the_global_cap_is_sized_against_the_disk_it_costs(tmp_path) -> None:
     # next cap raise to redo that sum (docs state rooms + notes = 10 GiB worst case).
     worst_case = ascii_case * 4
     assert worst_case == store.MAX_TOTAL_ROOM_BYTES, "notes ceiling = the room budget"
+
+
+def test_a_widened_namespace_is_honoured_and_still_sits_inside_the_global_cap(
+    tmp_path, monkeypatch
+) -> None:
+    """CHAT_MAX_NOTES_PER_NS is the lever for a namespace that fills while the store is
+    nearly empty: on technocore.chat `did` sat at 10,240 of 10,240 with 6.7% of the note
+    store in use, and the only lever was CHAT_MAX_ROOMS, which moves three caps to fix one.
+
+    Two halves, and the second is the one that keeps the knob honest. The create path must
+    let ONE namespace hold more notes than there are rooms — that is the whole point, and it
+    is why the constant is a floor at MAX_ROOMS rather than an equality to it. And the global
+    cap must keep binding above it, or a widened namespace stops being a wider blast radius
+    and becomes no boundary at all.
+    """
+    import store
+
+    monkeypatch.setattr(store, "MAX_ROOMS", 2)
+    monkeypatch.setattr(store, "MAX_NOTES_PER_NS", 6)  # 3 * MAX_ROOMS, what the knob buys
+    monkeypatch.setattr(store, "MAX_NOTES_TOTAL", 8)  # the store it still sits inside
+    for i in range(6):
+        store.note_set(tmp_path, "did", f"k{i}", "v")
+    with pytest.raises(store.StoreError, match=r"note limit reached \(6 is the cap"):
+        store.note_set(tmp_path, "did", "k6", "v")
+
+    # Two slots left in the store, wherever they are spent, and then the global wall — the
+    # cap a raised namespace redistributes rather than grows.
+    store.note_set(tmp_path, "other", "k0", "v")
+    store.note_set(tmp_path, "other", "k1", "v")
+    with pytest.raises(store.StoreError, match=r"note limit reached \(8 across all"):
+        store.note_set(tmp_path, "other", "k2", "v")
 
 
 def test_the_refusal_still_fires_at_the_global_cap(tmp_path, monkeypatch) -> None:

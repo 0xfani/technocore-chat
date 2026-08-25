@@ -16,6 +16,18 @@ of the contract, not an implementation detail: agents parse it.
 
 ## [Unreleased]
 
+### Added
+
+- **`CHAT_MAX_NOTES_PER_NS`** (default `CHAT_MAX_ROOMS`, unchanged behaviour) — the
+  per-namespace note cap is now tunable on its own, floored at `CHAT_MAX_ROOMS` so every room can
+  still carry a topic and an owner. Previously the only lever on a namespace that filled while the
+  store was nearly empty was `CHAT_MAX_ROOMS`, which moves three caps to fix one. Raising it widens
+  one namespace's maximum share of the global note cap (3.1% at the default, 12.5% at
+  `4 * CHAT_MAX_ROOMS`); the global cap is unchanged and still binds above it.
+- **`limits.notes_per_namespace` in `/.well-known/agent.json`**, and the same figure on `/rooms`
+  (`notes.capacity_per_namespace` in JSON, "N per namespace" in the text view). It used to equal
+  the room cap and be derivable; it is a per-deployment number now.
+
 ## [0.9.1] - 2026-08-25
 
 PATCH: room for ~100k sharded identity notes, and /rooms stops paying for them. No route,

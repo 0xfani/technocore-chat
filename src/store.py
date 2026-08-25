@@ -130,21 +130,27 @@ USAGE_FILE = ".usage"
 # leaving the count stale until the next reap (<= REAP_EVERY). Accepted deliberately — the
 # alternative is fsyncing a counter on every create, which is the cost being removed.
 NOTES_FILE = ".notes-count"
-# = MAX_ROOMS on purpose: the reserved namespaces (topic, room-owners, room-allow,
-# room-nonce) hold at most one note per room, so this equality is the invariant that lets
-# EVERY room carry a topic and an owner. Raising MAX_ROOMS raises this with it.
+# >= MAX_ROOMS, and exactly MAX_ROOMS unless an operator says otherwise: the reserved
+# namespaces (topic, room-owners, room-allow, room-nonce) hold at most one note per room, so
+# that floor is the invariant that lets EVERY room carry a topic and an owner. Raising
+# MAX_ROOMS raises the floor with it; CHAT_MAX_NOTES_PER_NS raises only this, and config
+# holds the floor so nothing here has to re-check it.
 #
-# Deliberately NOT raised when MAX_NOTES_TOTAL below is. This is the reserved-namespace
-# invariant, not a scale knob: it says what ONE namespace may hold, and the answer stays
-# "enough for every room to carry a topic". Identity notes reach six figures by being
-# spread across namespaces instead — the did-<2hex> sharding of the DID-note convention
-# (#96), which splits the single `did` namespace this cap had already filled into 256, so
-# 100k identities are 256 namespaces of ~400 and every one stays far under this cap.
-# Sharding is a convention change in the manual, not a server change: nothing here reads
-# it, which is why the only constant this repo has to move for it is the global cap below.
-# Raising THIS to make identity fit would instead widen what one flooded namespace may
-# take — the per-namespace cap is a blast radius, and identity is not a reason to grow it.
-MAX_NOTES_PER_NS = MAX_ROOMS
+# Deliberately NOT raised when MAX_NOTES_TOTAL below is, and still not the answer to
+# identity. It says what ONE namespace may hold, and the default answer stays "enough for
+# every room to carry a topic". Identity notes reach six figures by being spread across
+# namespaces instead — the did-<2hex> sharding of the DID-note convention (#96), which
+# splits the single `did` namespace this cap had already filled into 256, so 100k identities
+# are 256 namespaces of ~400 and every one stays far under this cap. Sharding is a convention
+# change in the manual, not a server change: nothing here reads it, which is why the only
+# constant this repo has to move for it is the global cap below.
+#
+# What the knob buys is a deployment lever for the gap between those two facts — clients with
+# the pre-sharding path baked in keep filling one namespace, and the operator's only previous
+# move was MAX_ROOMS, which drags three caps along. What it costs is blast radius: raising
+# this widens what one flooded namespace may take out of the global cap (see config for the
+# share arithmetic). An instance that sets nothing keeps today's bound exactly.
+MAX_NOTES_PER_NS = config.MAX_NOTES_PER_NS
 # A per-namespace cap bounds nothing on a public service: namespaces are never enumerated
 # and cost nothing to invent, so a flood picks a fresh one per write. The global cap is the
 # one that holds, and it bounds namespace directories too because a namespace only exists
@@ -238,7 +244,7 @@ ALLOW_NS = "room-allow"  # /kv/room-allow/<room>  -> space-separated did:keys
 # Notes are durable and have no ring, so unlike a message a captured signed note URL would
 # replay forever — and replaying an *old* allow-list is how a revoked key gets itself back
 # in. This is the smallest state that closes that, and it rides the existing CAS primitive
-# for its own atomicity. MAX_NOTES_PER_NS = MAX_ROOMS, so every room may hold an owner.
+# for its own atomicity. MAX_NOTES_PER_NS >= MAX_ROOMS, so every room may hold an owner.
 NONCE_NS = "room-nonce"
 TOPIC_NS = "topic"  # /kv/topic/<room>      -> what the room is for
 # A topic is an ordinary note (MAX_VALUE_CHARS), and /rooms shows one per room it lists:
@@ -1591,7 +1597,11 @@ def note_stats(root: Path) -> dict:
     display figure.
     """
     total, size = _note_totals(root)
-    return {"total": total, "bytes": size, "capacity": MAX_NOTES_TOTAL}
+    # Both caps: the global one a write is refused against, and what one namespace may
+    # hold — published because CHAT_MAX_NOTES_PER_NS makes the second per-deployment, and
+    # an operator who raised it has nowhere else to read back what the service took.
+    caps = {"capacity": MAX_NOTES_TOTAL, "capacity_per_namespace": MAX_NOTES_PER_NS}
+    return {"total": total, "bytes": size, **caps}
 
 
 def list_notes(root: Path, ns: str) -> list[str]:

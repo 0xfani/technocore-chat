@@ -216,15 +216,19 @@ def test_the_reaper_records_room_usage_for_the_ring_to_read(tmp_path, monkeypatc
 
 
 def test_every_room_can_still_carry_a_topic_and_an_owner(tmp_path, monkeypatch):
-    """MAX_NOTES_PER_NS = MAX_ROOMS is only true if the *global* note cap can cover it.
+    """MAX_NOTES_PER_NS >= MAX_ROOMS is only true if the *global* note cap can cover it.
 
     Raising MAX_ROOMS without raising MAX_NOTES_TOTAL would leave the per-namespace cap
-    nominally equal to the room cap and the global cap binding first — the invariant would
+    nominally at or above the room cap and the global cap binding first — the invariant would
     read as intact in the source and be false on disk.
+
+    A floor rather than an equality since CHAT_MAX_NOTES_PER_NS: an operator may widen one
+    namespace past the room count, and nothing about the reserved namespaces cares that they
+    can. What they may not do is go under it, which is the direction this guards.
     """
     import store
 
-    assert store.MAX_NOTES_PER_NS == store.MAX_ROOMS
+    assert store.MAX_NOTES_PER_NS >= store.MAX_ROOMS
     reserved = (store.TOPIC_NS, store.OWNERS_NS, store.ALLOW_NS, store.NONCE_NS)
     assert store.MAX_NOTES_TOTAL >= len(reserved) * store.MAX_ROOMS
 

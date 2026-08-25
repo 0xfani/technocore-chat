@@ -252,7 +252,12 @@ def test_rooms_overview_hides_private_rooms_and_survives_an_empty_store(client):
         "capacity": store.MAX_ROOMS,
         "bytes": 0,
         "bytes_capacity": store.MAX_TOTAL_ROOM_BYTES,
-        "notes": {"total": 0, "bytes": 0, "capacity": store.MAX_NOTES_TOTAL},
+        "notes": {
+            "total": 0,
+            "bytes": 0,
+            "capacity": store.MAX_NOTES_TOTAL,
+            "capacity_per_namespace": store.MAX_NOTES_PER_NS,
+        },
         # Present on an empty store too: it describes which keys of a rooms[] entry are
         # caller-chosen, which is true of the shape whether or not any room exists yet.
         "untrusted": {"fields": ["room", "topic"], "note": app.LISTING_BANNER},
@@ -359,10 +364,14 @@ def test_rooms_reports_note_usage_without_naming_namespaces(client):
     client.get("/kv/p-secretns/k/set/hello")
     body = client.get("/rooms").text
     assert f"notes 1 of {store.MAX_NOTES_TOTAL}" in body
+    # The per-namespace cap is published beside the global one because it is a knob
+    # (CHAT_MAX_NOTES_PER_NS) — a caller can no longer read it off the room cap.
+    assert f"{store.MAX_NOTES_PER_NS} per namespace" in body
     assert "p-secretns" not in body  # aggregate only: namespaces stay unenumerable
     stats = client.get("/rooms?format=json").json()["notes"]
     assert stats["total"] == 1 and stats["bytes"] == 5
     assert stats["capacity"] == store.MAX_NOTES_TOTAL
+    assert stats["capacity_per_namespace"] == store.MAX_NOTES_PER_NS
 
 
 def test_new_public_rooms_are_announced(client):

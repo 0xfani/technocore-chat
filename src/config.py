@@ -103,6 +103,28 @@ EPHEMERAL_TTL_SECONDS = int(os.environ.get("CHAT_EPHEMERAL_TTL_SECONDS", "900"))
 # Raising it costs directory walks (the reaper and /rooms are O(cap)), not disk — the disk
 # budget is MAX_TOTAL_ROOM_BYTES and is enforced separately.
 MAX_ROOMS = max(1, int(os.environ.get("CHAT_MAX_ROOMS", "5120")))
+# What ONE namespace may hold. Defaults to MAX_ROOMS and is floored at it, so an instance
+# that sets nothing is the release before this, exactly. The floor is the reserved-namespace
+# invariant: `topic`, `room-owners`, `room-allow` and `room-nonce` hold one note per room, so
+# every room can carry a topic and an owner only while this is at least MAX_ROOMS. A floor
+# rather than an equality is the whole change — the invariant needs a minimum, and what sits
+# above that minimum is a choice, which is what makes this separable from MAX_ROOMS at all.
+#
+# It became a knob because a full namespace had no lever of its own. On technocore.chat the
+# `did` namespace sat at 10,240 of 10,240 while the whole store was 6.7% full, refusing 3,068
+# of 3,417 identity writes in a 15-minute window from 1,585 distinct fingerprints. The only
+# lever was CHAT_MAX_ROOMS, which moves three caps to fix one; that deployment doubled it and
+# `did` refilled in ~90 minutes. Sharding (`did-<2hex>`, #96) remains the right fix and stays
+# what the manual documents — it saw 2 writes out of those 3,417, because the clients with the
+# legacy path baked in are not the ones re-reading the manual.
+#
+# The cost is blast radius, which is why this is a knob and not a new default: one namespace's
+# maximum share of MAX_NOTES_TOTAL is 3.1% at the default and 12.5% at 4 * MAX_ROOMS. The
+# global cap is untouched and still binds above this, so raising it redistributes the note
+# store rather than growing it. The other half of the old objection — that a bigger
+# per-namespace cap meant a bigger walk — went away in 0.9.1: the gauge is cached and a create
+# does one unsized scandir of the caller's own namespace.
+MAX_NOTES_PER_NS = max(MAX_ROOMS, int(os.environ.get("CHAT_MAX_NOTES_PER_NS", MAX_ROOMS)))
 # Long-poll waiter slots, globally and per IP. Per *process*, so under `--workers N` the
 # real ceiling is N times these — which is the reason they are knobs at all: an operator
 # adding workers has no other way to hold the total where it was. 0 is meaningful here and
