@@ -167,12 +167,9 @@ def take(request, kind, per_min, burst=None) -> tuple[int, float]:
     left, wait = limit.take(
         request, kind, per_min, burst, ip_header=CLIENT_IP_HEADER, max_buckets=MAX_BUCKETS
     )
-    # And the /rooms cache is dropped here. This is the fast path, not the guarantee: it
-    # runs *before* the store write, so on its own it loses the race against a concurrent
-    # reader that walks while the writer is still in fsync. `_rooms_stamp` is what closes
-    # that — for note writes too, now that notes_written is one of the counters it reads.
-    # The clear is kept because it costs nothing and serves the common case without
-    # waiting out a stamp comparison.
+    # The /rooms cache is dropped here — the fast path, not the guarantee: it runs
+    # *before* the store write, so `_rooms_stamp` (which covers note writes too, via
+    # notes_written) is what closes the race against a concurrent walker.
     if kind == "write":
         _rooms_cache.clear()
     return left, wait
@@ -379,16 +376,9 @@ def respond(request: Request, view: dict, body_text: str | None = None, note: st
 
 
 def _edge_cacheable(resp: Response) -> Response:
-    """Mark a world-readable read as briefly shareable by the CDN in front.
-
-    Only /rooms and plain room reads pass here — the two reads /humans polls every 5s per
-    open tab, so N tabs collapse to one origin request per EDGE_CACHE_SECONDS. Shared
-    caches only (`max-age=0` keeps browsers revalidating), and never a long-poll: a held
-    reply is one caller's cursor at one moment. The budget footer in a shared copy may be
-    another caller's for a second; it names no one and spends nothing — an edge hit never
-    debits a bucket. Nothing here makes the CDN cache — Cloudflare needs a Cache Rule
-    marking these paths eligible before it honors origin s-maxage.
-    """
+    """Mark a world-readable read as briefly shareable by the CDN in front. Only /rooms
+    and plain room reads pass here, never a long-poll — a held reply is one caller's
+    cursor. The CDN still needs a rule marking these paths cache-eligible."""
     seconds = config.EDGE_CACHE_SECONDS
     if seconds:
         resp.headers["Cache-Control"] = (
@@ -605,32 +595,22 @@ def _rooms_stamp() -> tuple:
     newer than the data the walk sees. A stale entry is therefore always detected, whatever
     order the two requests interleaved in.
 
-    Note writes are covered too: notes_written is one of the counters, so a topic set
-    beside a room invalidates the view that renders it, from any worker process.
+    notes_written makes note and topic writes invalidate too, from any worker.
     """
     counted = store.counters(config.ROOT)
     return tuple(counted[key] for key in store.COUNTER_KEYS)
 
 
-# One entry, not per-limit: the note walk does not depend on `limit`. The stamp carries
-# ROOT (tests re-point it per test) and the on-disk notes_written counter, which
-# store.note_set bumps *after* a write lands — the same ordering argument as _rooms_stamp
-# (a walk that raced a note write caches under the pre-write value, so it can never be
-# served after the bump), and the same file every worker process reads, so a sibling
-# uvicorn worker's write invalidates this one's cache too.
+# One entry — the note walk does not depend on `limit`. Stamped on ROOT and the on-disk
+# notes_written counter (bumped after each note write, read by every worker), with the
+# same read-before-walk ordering as _rooms_stamp.
 _note_stats_cache: tuple[tuple, float, dict] | None = None
 
 
 def _note_stats() -> dict:
-    """store.note_stats through its own cache.
-
-    Its own cache rather than a ride on _rooms_cache because the two invalidate at very
-    different rates: the rooms walk is stale on every message anywhere (that is the
-    own-writes guarantee), while the note gauge changes only when a note is written or
-    reaped. Fused, the 41k-stat note walk was re-run on every message; split, a /rooms
-    miss costs only the O(shown) room walk. The clock only bounds what no counter
-    announces — reaper deletions of idle notes.
-    """
+    """store.note_stats through its own cache: the note gauge changes only when a note
+    is written or reaped, while the rooms walk is stale on every message. Fused, the
+    41k-stat walk re-ran per message; the clock only bounds reaper deletions."""
     global _note_stats_cache
     stamp = (store.counters(config.ROOT)["notes_written"], config.ROOT)
     now = time.monotonic()

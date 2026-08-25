@@ -16,6 +16,7 @@ import os
 import re
 import time
 import unicodedata
+from collections import OrderedDict
 from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import UTC, datetime
@@ -569,14 +570,49 @@ def list_rooms(root: Path) -> list[str]:
     return sorted(p.stem for p in d.glob("*.jsonl") if _listable(p.stem))
 
 
+# (top, nicks) per room, validated against the (mtime_ns, size) stat the overview walk
+# already does — so a walk re-reads only the rooms a write actually changed. LRU-bounded.
+_WINDOW_MEMO_MAX = 512
+_window_memo: OrderedDict[tuple, tuple] = OrderedDict()
+
+
+def _cached_window(root: Path, name: str, stamp: tuple) -> tuple[int, list[str]]:
+    key = (str(root), name)
+    hit = _window_memo.get(key)
+    if hit and hit[0] == stamp:
+        _window_memo.move_to_end(key)
+        return hit[1]
+    view = room_window(root, name)
+    _window_memo[key] = (stamp, view)
+    _window_memo.move_to_end(key)
+    while len(_window_memo) > _WINDOW_MEMO_MAX:
+        _window_memo.popitem(last=False)
+    return view
+
+
+# Topic previews, valid while notes_written holds (a topic set is a note write); reaper
+# deletions age out with NOTE_STATS_CACHE_SECONDS, like the note gauge in app.py.
+_topics_memo: tuple = ((), 0.0, {})
+
+
+def _cached_topic(root: Path, room: str, stamp: tuple, now: float) -> str | None:
+    global _topics_memo
+    ttl = config.NOTE_STATS_CACHE_SECONDS  # per call, so 0 disables an existing entry too
+    if ttl <= 0 or _topics_memo[0] != stamp or now >= _topics_memo[1]:
+        _topics_memo = (stamp, now + ttl, {})
+    cache = _topics_memo[2]
+    if room not in cache:
+        cache[room] = topic(root, room)
+    return cache[room]
+
+
 def room_stats(root: Path, limit: int = 50) -> dict:
     """Recency-sorted room summaries for the overview.
 
     `size` and `idle` come free from the directory stat; `last_seq` and the engagement
-    aggregates cost one small tail read, so they are computed only for the rooms actually
-    shown. That keeps the overview O(shown) rather than O(rooms) at the room cap — which is
-    what let the cap grow tenfold without the overview getting slower. See WINDOW_BYTES for
-    the resulting worst-case bound.
+    aggregates cost one small tail read, computed only for the rooms actually shown and
+    memoized against that same stat — so a walk re-reads only rooms that changed since
+    the last one. See WINDOW_BYTES for the per-room worst-case bound.
     """
     d = root / "rooms"
     now = time.time()
@@ -593,14 +629,16 @@ def room_stats(root: Path, limit: int = 50) -> dict:
                     st = e.stat()
                 except OSError:
                     continue  # reaped between the readdir and the stat
-                entries.append((st.st_mtime, st.st_size, name))
+                entries.append((st.st_mtime, st.st_size, name, st.st_mtime_ns))
     except FileNotFoundError:
         pass
     entries.sort(reverse=True)
     shown = []
     windows = []
-    for mtime, size, name in entries[: max(1, min(int(limit), MAX_LIMIT))]:
-        top, nicks = room_window(root, name)
+    topics_stamp = (counters(root)["notes_written"], str(root))
+    mono = time.monotonic()
+    for mtime, size, name, mtime_ns in entries[: max(1, min(int(limit), MAX_LIMIT))]:
+        top, nicks = _cached_window(root, name, (mtime_ns, size))
         windows.append(nicks)
         shown.append(
             {
@@ -608,7 +646,7 @@ def room_stats(root: Path, limit: int = 50) -> dict:
                 "last_seq": top,
                 "bytes": size,
                 "idle_seconds": max(0, int(now - mtime)),
-                "topic": topic(root, name),
+                "topic": _cached_topic(root, name, topics_stamp, mono),
                 **_engagement(nicks),
             }
         )
@@ -897,11 +935,8 @@ def _scan(d: Path, suffix: str, sized: bool = False) -> tuple[int, int]:
     """(count, total bytes) of the entries in `d` named `*suffix`, in one pass.
 
     os.scandir rather than Path.glob, and one pass rather than two, because every caller
-    below is on a *create* path. Creates do run on a threadpool — the GET write lanes are
-    sync routes Starlette dispatches there, and the POST lanes call run_in_threadpool
-    themselves — but the pool is a few dozen slots shared with every blocking read, and a
-    create also holds the create gate, so this walk's cost is paid by its caller *and* by
-    every create queued behind the gate.
+    below is on a *create* path — run on the shared threadpool, so the cost is paid by
+    the caller and by every create queued behind the create gate.
 
     That is what made it worth measuring rather than assuming. At a full store, the glob
     it replaces cost 36 ms per new room (a counting glob, then a second one that stats)
@@ -1310,9 +1345,8 @@ def note_set(
         tmp = path.with_suffix(".tmp")
         tmp.write_text(value, encoding="utf-8")
         os.replace(tmp, path)
-    # After the write is on disk, like append's bump: the counter is what invalidates the
-    # note-stats cache in app.py, and it lives in a file so every worker process sees it —
-    # a process-local generation would leave a sibling worker serving pre-write counts.
+    # After the write is on disk, like append's bump: the counter invalidates the
+    # note-derived caches, and being on disk every worker sees it.
     _bump(root, notes_written=1)
     return {"ns": ns, "key": key, "bytes": len(value.encode()), "ts": _now()}
 

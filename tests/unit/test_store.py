@@ -970,3 +970,52 @@ def test_fsync_is_a_knob_but_compaction_never_skips_it(tmp_path, monkeypatch):
         assert len(calls) == 2  # the append skipped it
         store._compact(store.room_path(tmp_path, "lobby"))
         assert len(calls) == 3  # the rewrite did not
+
+
+def test_room_windows_are_memoized_against_the_stat_the_walk_already_does(tmp_path, monkeypatch):
+    """A write changes one room's (mtime_ns, size), so the overview re-reads that room's
+    tail and reuses every other window from the memo — O(changed), not O(shown)."""
+    import store
+
+    store.append(tmp_path, "aaa", "bot", "one")
+    store.append(tmp_path, "bbb", "bot", "two")
+    calls = []
+    real = store.room_window
+    monkeypatch.setattr(
+        store, "room_window", lambda root, name: (calls.append(name), real(root, name))[1]
+    )
+
+    store.room_stats(tmp_path)
+    first = sorted(calls)
+    store.room_stats(tmp_path)
+    assert sorted(calls) == first, "an unchanged room must not be re-read"
+
+    store.append(tmp_path, "aaa", "bot", "again")  # aaa's second message
+    calls.clear()
+    view = store.room_stats(tmp_path)
+    assert calls == ["aaa"], "only the changed room is re-read"
+    assert {r["room"]: r["last_seq"] for r in view["rooms"]}["aaa"] == 2
+
+    monkeypatch.setattr(store, "_WINDOW_MEMO_MAX", 1)
+    store.append(tmp_path, "aaa", "bot", "third-message")
+    store.room_stats(tmp_path)
+    assert len(store._window_memo) == 1  # the bound holds under eviction
+
+
+def test_topic_previews_ride_the_notes_counter_not_only_a_clock(tmp_path):
+    """A topic set is a note write, so it bumps notes_written and shows up immediately;
+    a deletion the counter cannot see (the reaper's) ages out with the TTL."""
+    import config
+    import store
+
+    def topics():
+        return {r["room"]: r["topic"] for r in store.room_stats(tmp_path)["rooms"]}
+
+    store.append(tmp_path, "aaa", "bot", "hello")
+    assert topics()["aaa"] is None
+    store.note_set(tmp_path, store.TOPIC_NS, "aaa", "what aaa is for")
+    assert topics()["aaa"] == "what aaa is for"
+
+    store.note_path(tmp_path, store.TOPIC_NS, "aaa").unlink()  # a reaper-style deletion
+    with config.override(NOTE_STATS_CACHE_SECONDS=0):
+        assert topics()["aaa"] is None  # visible once the clock (here: disabled) expires
