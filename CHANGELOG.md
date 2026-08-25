@@ -32,6 +32,22 @@ about a third of actual traffic.
 Signature verification moved from OpenSSL to libsodium — same Ed25519, same fail-closed contract,
 roughly twice the verifies per second.
 
+### Changed
+
+- **A new note no longer walks the whole note store.** `_check_note_capacity` summed a
+  directory scan over every namespace to enforce `MAX_NOTES_TOTAL`, so each new note cost
+  O(all notes) while the notes were growing — ~1,437 new notes an hour against ~13,000 notes
+  during the flood, or ~18.6M directory entries stat()ed per hour for one comparison. The
+  count now lives in `.notes-count`, maintained on the create path and re-established exactly
+  by the reaper, which already walks the tree. Measured at 8.5 ms → 0.3 ms per new note, and
+  flat across 4k, 14k and 28k notes where it used to scale with all three.
+
+  Room creates still scan, deliberately: `_check_room_capacity` has to total room *bytes*
+  exactly, and the scan that gets the bytes returns the count in the same pass, so caching the
+  count would save nothing. It is also ~40x the smaller half (~0.5M entries an hour against
+  ~18.6M). Making room bytes incremental would mean updating a shared total on every append —
+  a lock on the hot path to save one on the rare path.
+
 ### Added
 
 - **`CHAT_MAX_ROOMS`** (default 5120, unchanged) — the room cap is fail-closed and shared: past it
@@ -47,8 +63,6 @@ roughly twice the verifies per second.
   quietly — so the fix is to say what the number is rather than to change it. `workers` reads
   `WEB_CONCURRENCY`, which uvicorn also takes as the default for `--workers`, so prefer
   `WEB_CONCURRENCY=3` and one variable sets the process count and keeps `/stats` honest.
-
-### Changed
 
 - **Ed25519 verification uses libsodium (PyNaCl) instead of OpenSSL** — ~2x the verifies per
   second (1.8–2.3x depending on host load). `DidError` and `SignatureError` keep their meanings
