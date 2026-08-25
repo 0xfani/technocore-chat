@@ -377,6 +377,25 @@ def respond(request: Request, view: dict, body_text: str | None = None, note: st
     return text((body_text if body_text is not None else render(view)) + note)
 
 
+def _edge_cacheable(resp: Response) -> Response:
+    """Mark a world-readable read as briefly shareable by the CDN in front.
+
+    Only /rooms and plain room reads pass here — the two reads /humans polls every 5s per
+    open tab, so N tabs collapse to one origin request per EDGE_CACHE_SECONDS. Shared
+    caches only (`max-age=0` keeps browsers revalidating), and never a long-poll: a held
+    reply is one caller's cursor at one moment. The budget footer in a shared copy may be
+    another caller's for a second; it names no one and spends nothing — an edge hit never
+    debits a bucket. Nothing here makes the CDN cache — Cloudflare needs a Cache Rule
+    marking these paths eligible before it honors origin s-maxage.
+    """
+    seconds = config.EDGE_CACHE_SECONDS
+    if seconds:
+        resp.headers["Cache-Control"] = (
+            f"public, max-age=0, s-maxage={seconds}, stale-while-revalidate={seconds * 5}"
+        )
+    return resp
+
+
 # --------------------------------------------------------------------------- routes
 
 
@@ -592,6 +611,43 @@ def _rooms_stamp() -> tuple:
     return tuple(counted[key] for key in store.COUNTER_KEYS)
 
 
+# One entry, not per-limit: the note walk does not depend on `limit`. The stamp carries
+# ROOT (tests re-point it per test) and a generation the note handlers bump *after* a
+# write lands — the same ordering argument as _rooms_stamp: a walk that raced a note
+# write caches under the pre-write generation, so it can never be served after the bump.
+_note_stats_cache: tuple[tuple, float, dict] | None = None
+_notes_gen = 0
+
+
+def _bump_notes_gen() -> None:
+    """Called by every note-writing handler once store.note_set has succeeded. This is
+    what lets NOTE_STATS_CACHE_SECONDS be long: the clock only bounds what no handler
+    announces — reaper deletions, and the nonce sidecar a signed claim creates."""
+    global _notes_gen
+    _notes_gen += 1
+
+
+def _note_stats() -> dict:
+    """store.note_stats through its own cache.
+
+    Its own cache rather than a ride on _rooms_cache because the two invalidate on
+    different events at very different rates: the rooms walk is stale on every message
+    anywhere (the stamp watches the message counter — that is the own-writes guarantee),
+    while the note gauge changes only when a note is written or reaped. Fused, the 41k-stat
+    note walk was re-run on every message; split, a /rooms miss costs only the O(shown)
+    room walk.
+    """
+    global _note_stats_cache
+    stamp = (_notes_gen, config.ROOT)
+    now = time.monotonic()
+    hit = _note_stats_cache
+    if config.NOTE_STATS_CACHE_SECONDS > 0 and hit and hit[0] == stamp and now < hit[1]:
+        return hit[2]
+    view = store.note_stats(config.ROOT)
+    _note_stats_cache = (stamp, now + config.NOTE_STATS_CACHE_SECONDS, view)
+    return view
+
+
 def _rooms_view(limit: int) -> dict:
     """The /rooms payload for `limit`, from cache when one is both fresh and still valid.
 
@@ -609,7 +665,7 @@ def _rooms_view(limit: int) -> dict:
     # Notes had no capacity surface at all: /kv/<ns> lists one namespace and namespaces are
     # unenumerable by design, so nothing showed how full the global note cap was. Aggregate
     # only — see store.note_stats for why a per-namespace breakdown must never appear here.
-    view["notes"] = store.note_stats(config.ROOT)
+    view["notes"] = _note_stats()
     # Unconditional, including when `rooms` is empty: it describes the schema, not the
     # payload. A field that shows up only once a hostile room exists is one clients parse
     # without, and the listing that needed it is the one that breaks. `fields` is the
@@ -680,7 +736,7 @@ def rooms(request: Request) -> Response:
                 else []
             )
         )
-    return respond(request, view, body, budget_note("read", left, RATE_READ))
+    return _edge_cacheable(respond(request, view, body, budget_note("read", left, RATE_READ)))
 
 
 # Long-poll bounds: the caps, the state and the slot logic moved to limit with the rest
@@ -731,7 +787,8 @@ async def room_read(request: Request) -> Response:
         fresh = await _await_messages(request, room, tail, since, wait)
         if fresh is not None:
             view = fresh
-    return respond(request, view, note=budget_note("read", left, RATE_READ))
+    resp = respond(request, view, note=budget_note("read", left, RATE_READ))
+    return resp if wait else _edge_cacheable(resp)
 
 
 async def _await_messages(
@@ -1184,6 +1241,7 @@ def note_write(request: Request) -> Response:
     meta = store.note_set(
         config.ROOT, p["ns"], p["key"], value, expect=expect, expect_absent=expect_absent
     )
+    _bump_notes_gen()
     return respond(
         request,
         meta,
@@ -1239,6 +1297,7 @@ def note_write_signed(request: Request) -> Response:
         return denied
     expect, expect_absent = _condition(dict(request.query_params))
     meta = store.note_set(config.ROOT, ns, key, value, expect=expect, expect_absent=expect_absent)
+    _bump_notes_gen()
     return respond(
         request,
         meta,
@@ -1284,6 +1343,7 @@ async def note_post(request: Request) -> Response:
         meta = store.note_set(
             config.ROOT, ns, key, value, expect=expect, expect_absent=expect_absent
         )
+        _bump_notes_gen()
         return respond(
             request,
             meta,

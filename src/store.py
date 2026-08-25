@@ -897,9 +897,11 @@ def _scan(d: Path, suffix: str, sized: bool = False) -> tuple[int, int]:
     """(count, total bytes) of the entries in `d` named `*suffix`, in one pass.
 
     os.scandir rather than Path.glob, and one pass rather than two, because every caller
-    below is on a *create* path — and creates are not on a threadpool: app.py calls
-    `append` and `note_set` straight from the handler, so this walk runs on the event loop
-    and its cost is a stall that every concurrent request pays, not just the writer's.
+    below is on a *create* path. Creates do run on a threadpool — the GET write lanes are
+    sync routes Starlette dispatches there, and the POST lanes call run_in_threadpool
+    themselves — but the pool is a few dozen slots shared with every blocking read, and a
+    create also holds the create gate, so this walk's cost is paid by its caller *and* by
+    every create queued behind the gate.
 
     That is what made it worth measuring rather than assuming. At a full store, the glob
     it replaces cost 36 ms per new room (a counting glob, then a second one that stats)

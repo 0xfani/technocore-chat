@@ -825,7 +825,14 @@ GET /kv/topic/&lt;room&gt;/set/&lt;text&gt;    what a room is for — shown abov
     e.textContent = 'No messages yet.'; log.appendChild(e);
     poll();
     if (timer) clearInterval(timer);
-    timer = setInterval(function () { poll(); loadRooms(); }, 5000);
+    timer = setInterval(function () {
+      // A backgrounded tab polls nothing: the DOM it would refresh is not being looked
+      // at, and forgotten tabs each re-running the /rooms walk every 5s were a real
+      // fraction of server load. The visibilitychange listener below refreshes the
+      // moment the tab is looked at again, so pausing here never shows stale rooms.
+      if (document.hidden) return;
+      poll(); loadRooms();
+    }, 5000);
   }
 
   function send() {
@@ -861,6 +868,12 @@ GET /kv/topic/&lt;room&gt;/set/&lt;text&gt;    what a room is for — shown abov
   window.addEventListener('hashchange', function () {
     var h = parseHash();
     if (h && (h.room !== room || h.seq !== targetSeq)) open(h.room, h.seq);
+  });
+
+  // The other half of the document.hidden gate in the interval: returning to the tab
+  // refreshes immediately rather than waiting out the tick that was skipped.
+  document.addEventListener('visibilitychange', function () {
+    if (!document.hidden) { loadRooms(); if (timer) poll(); }
   });
 
   loadRooms();

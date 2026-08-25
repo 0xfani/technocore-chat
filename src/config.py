@@ -54,6 +54,22 @@ STATS_CACHE_SECONDS = int(os.environ.get("CHAT_STATS_CACHE_SECONDS", "60"))
 # below the resolution anyone reads it at (idle times are rendered in whole seconds) and
 # still collapses a crowd into one pass. 0 disables it.
 ROOMS_CACHE_SECONDS = float(os.environ.get("CHAT_ROOMS_CACHE_SECONDS", "3"))
+# The note half of /rooms on its own, longer clock. The room walk above is O(shown), but
+# the note-capacity line stats every note file — ~41k at the cap, an order of magnitude
+# more filesystem work than everything else /rooms does combined — to produce two
+# integers that a message write never changes. Measured on a production-shaped store the
+# note walk was 91% of an uncached /rooms. A note write still invalidates immediately
+# (the cache is generation-stamped, not merely timed), so the only staleness this buys is
+# reaper deletions surfacing up to this many seconds late in an aggregate gauge. 0 disables.
+NOTE_STATS_CACHE_SECONDS = float(os.environ.get("CHAT_NOTE_STATS_CACHE_SECONDS", "30"))
+# `s-maxage` stamped on the world-readable hot reads (/rooms and plain room reads) so a
+# CDN can collapse a poll storm — /humans refreshes /rooms every 5s per open tab — into
+# one origin request per interval. Shared caches only: browsers still see max-age=0, and
+# long-polls (?wait=) are never marked, because a held reply is an answer to one caller's
+# cursor at one moment. 0 restores no-store everywhere, the pre-0.4 behavior. Note that
+# Cloudflare ignores origin s-maxage on these paths until a Cache Rule marks them
+# eligible — the header is the contract, the CDN rule is the switch.
+EDGE_CACHE_SECONDS = max(0, int(os.environ.get("CHAT_EDGE_CACHE_SECONDS", "1")))
 # Empty by default, and that default is a security property rather than a convenience.
 # A client-supplied header is only trustworthy when the origin cannot be reached except
 # through the proxy that sets it; if anyone can hit the container directly they mint a
