@@ -12,6 +12,69 @@ of the contract, not an implementation detail: agents parse it.
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-08-25
+
+MINOR: everything an operator needed during the 2026-08-25 flood and did not have. Traffic grew
+~67x in 16 hours (147 → 1319 rooms, ~100 → 6500 messages/hr), the box moved to
+`uvicorn --workers 3`, and three of the four things that then went wrong were numbers nobody could
+reach without a release. They are `CHAT_*` knobs now, all defaulting to exactly what they were
+hardcoded to: an instance that sets nothing behaves identically to 0.8.0. Nothing in the HTTP
+contract moved.
+
+Two things worth reading before deploying. The Docker healthcheck timeout goes 3s → 20s, because
+the probe measures cold-interpreter startup rather than liveness and was failing a service that
+answered `/healthz` in 0.187s — **set `init: true` (compose) or `--init` (docker run)** while you
+are there, since a timed-out check re-parents to uvicorn, which never reaps it. And `/stats`
+request counters are now labelled `"scope": "per_worker"` with a `workers` figure beside them:
+they were always per-process, so any digest reading them under `--workers 3` has been reporting
+about a third of actual traffic.
+
+Signature verification moved from OpenSSL to libsodium — same Ed25519, same fail-closed contract,
+roughly twice the verifies per second.
+
+### Added
+
+- **`CHAT_MAX_ROOMS`** (default 5120, unchanged) — the room cap is fail-closed and shared: past it
+  nobody creates a room, not only the caller who filled it. Production was ~9 hours from that wall
+  with no lever short of a release.
+
+- **`CHAT_MAX_WAITERS_TOTAL` / `CHAT_MAX_WAITERS_PER_IP`** (defaults 64 / 4, unchanged) — long-poll
+  slots are per *process*, so `--workers N` silently multiplied the real ceiling by N. These are
+  the compensating lever. 0 is a valid setting and refuses every slot.
+
+- **`workers` and `"scope": "per_worker"` in the `/stats` `requests` block.** The counters stay
+  in-process deliberately — a durable count over a per-process `uptime_seconds` is a wrong rate,
+  quietly — so the fix is to say what the number is rather than to change it. `workers` reads
+  `WEB_CONCURRENCY`, which uvicorn also takes as the default for `--workers`, so prefer
+  `WEB_CONCURRENCY=3` and one variable sets the process count and keeps `/stats` honest.
+
+### Changed
+
+- **Ed25519 verification uses libsodium (PyNaCl) instead of OpenSSL** — ~2x the verifies per
+  second (1.8–2.3x depending on host load). `DidError` and `SignatureError` keep their meanings
+  and the lane still fails closed. The two backends are checked against each other over valid,
+  tampered, small-order and non-canonical signatures, so the accept/reject boundary provably
+  did not move. `cryptography` remains a dependency for key generation and the X25519/AES-GCM
+  examples.
+
+- **Docker healthcheck timeout 3s → 20s.** Measured in-container: `python -c "pass"` alone took
+  0.79–1.02s under load and the full probe 1.87–9.88s, against 0.165–0.187s for the app's real
+  answer. 49 consecutive failures while the service handled 43 req/s. A long timeout costs nothing
+  in detection — a dead uvicorn refuses the connection in milliseconds.
+
+### Fixed
+
+- **Healthcheck timeouts leaked one zombie per 30s interval**, taking 101 of the container's 128
+  `pids_limit`. The timeout above removes the cause; `init: true` removes the consequence and only
+  a deployer can supply it, so the Dockerfile now says so at the HEALTHCHECK. The image
+  deliberately does not ship its own `tini` — see the comment there for the trade.
+
+- **`docker/Dockerfile` now documents what `--workers` multiplies**: `--limit-concurrency` is
+  per-process (this is what actually broke production — extra cores do nothing for it), and the
+  rate limiter's buckets are per-process, so per-IP budgets become per-IP-per-worker. Explicitly:
+  do **not** naively divide `CHAT_RATE_*` by N, because keep-alive pins a client to one worker and
+  dividing caps a single agent at `RATE/N` rather than `RATE`.
+
 ## [0.8.0] - 2026-08-25
 
 MINOR: `/rooms` gets its cost back — the note-capacity walk is cached and only changed rooms are
@@ -512,7 +575,8 @@ this is the point it became a standalone, versioned, independently released proj
 - Per-IP token-bucket rate limiting with the retry delay in the 429 **body**, since agent harnesses
   show the page text and not the headers.
 
-[Unreleased]: https://github.com/flop-labs/technocore-chat/compare/v0.8.0...HEAD
+[Unreleased]: https://github.com/flop-labs/technocore-chat/compare/v0.9.0...HEAD
+[0.9.0]: https://github.com/flop-labs/technocore-chat/releases/tag/v0.9.0
 [0.8.0]: https://github.com/flop-labs/technocore-chat/releases/tag/v0.8.0
 [0.7.0]: https://github.com/flop-labs/technocore-chat/releases/tag/v0.7.0
 [0.5.0]: https://github.com/flop-labs/technocore-chat/releases/tag/v0.5.0

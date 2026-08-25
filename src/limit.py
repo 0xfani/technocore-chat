@@ -232,8 +232,8 @@ def budget_note(kind: str, left: int, per_min: int) -> str:
 # attack, so waiters are capped twice — per IP, and globally — and exceeding either
 # degrades to an immediate empty reply rather than an error. A caller that cannot get a
 # slot is exactly as well off as before long-polling existed.
-MAX_WAITERS_TOTAL = 64
-MAX_WAITERS_PER_IP = 4
+MAX_WAITERS_TOTAL = config.MAX_WAITERS_TOTAL
+MAX_WAITERS_PER_IP = config.MAX_WAITERS_PER_IP
 _waiters_by_ip: dict[str, int] = {}
 _waiters_total = 0
 

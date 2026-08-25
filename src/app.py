@@ -1449,7 +1449,22 @@ async def stats(request: Request) -> Response:
         _stats_cache = (now, view)
     view = {
         **view,
-        "requests": {**_requests, "uptime_seconds": int(time.time() - _started)},
+        # Per *worker*, and labelled as such rather than summed. `_requests` is a plain
+        # module dict, so under `--workers N` this endpoint reports roughly one worker's
+        # share of the traffic — the digest that reads it was quietly under-reporting by
+        # 3x once production moved to `--workers 3`. Sharing the counters through a file
+        # in CHAT_ROOT was the alternative and was rejected: it would make them outlive
+        # the process, and `uptime_seconds` sitting beside them is what turns a count into
+        # the rate anyone actually reads (see limit._requests, which says the same). A
+        # durable counter over a per-process uptime is a wrong rate, quietly. So the fix
+        # is to say what the number is: multiply by `workers` for a service-wide estimate,
+        # and see config.WORKERS for why that figure needs WEB_CONCURRENCY to be right.
+        "requests": {
+            **_requests,
+            "uptime_seconds": int(time.time() - _started),
+            "scope": "per_worker",
+            "workers": config.WORKERS,
+        },
         "capacity_limits": {
             "message_chars": store.MAX_TEXT_CHARS,
             "note_chars": store.MAX_VALUE_CHARS,

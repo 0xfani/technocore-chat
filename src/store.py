@@ -52,7 +52,7 @@ MAX_LIMIT = 200
 #
 # MAX_ROOMS bounds how many rooms the service *tracks* — the directory walks, the reaper,
 # the overview — not the disk.
-MAX_ROOMS = 5120
+MAX_ROOMS = config.MAX_ROOMS
 # MAX_TOTAL_ROOM_BYTES is the disk budget, stated rather than derived, and it is
 # deliberately the OLD product (512 * 10 MiB): ten times the rooms cost exactly the same
 # volume as before, because what filled the old cap was thousands of small rooms and not
