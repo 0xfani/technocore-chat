@@ -1193,8 +1193,8 @@ def _note_count(root: Path) -> int:
     return _note_totals(root)[0]
 
 
-def _count_new_note(root: Path, ns_dir: Path, size: int) -> None:
-    """Count a note that is about to exist, before it does — globally and in its namespace.
+def _count_new_note(root: Path, ns_dir: Path, size: int, delta: int) -> None:
+    """Move both note counts by `delta` — +1 to reserve a create, -1 to give it back.
 
     Takes the file's own lock as well as the create gate: the gate orders note creates
     against each other, this orders the read-modify-write against a concurrent rebuild. One
@@ -1209,9 +1209,9 @@ def _count_new_note(root: Path, ns_dir: Path, size: int) -> None:
     """
     with _locked(root / NOTES_FILE):
         count, used = _note_totals(root)
-        _write_note_count(root, count + 1, used + size)
+        _write_note_count(root, max(0, count + delta), max(0, used + size * delta))
         ns_count, ns_used = _note_totals(ns_dir, _ns_totals)
-        _write_note_count(ns_dir, ns_count + 1, ns_used + size)
+        _write_note_count(ns_dir, max(0, ns_count + delta), max(0, ns_used + size * delta))
 
 
 def _at_capacity(cap: int, what: str) -> StoreError:
@@ -1327,18 +1327,43 @@ def _create_gate(gate: Path, path: Path, check, counted=None):
     the cap is overshot by up to one write per in-flight request. Counting and creating
     under one shared gate makes it hard. Writes to a file that already exists never take
     the gate, so steady-state traffic stays as parallel as before.
+
+    `counted` is a reservation, so it takes a sign: the count moves before the write and
+    moves back if the write does not happen. Both halves are needed and neither is the
+    crash window the ordering below is about.
+
+      - The body can refuse *after* the gate has counted. `?if=<value>` against a key that
+        does not exist reaches its CAS check inside the body and raises, so a caller
+        repeating one against fresh keys used to add a note to the totals every time while
+        creating none — cheap for them, since a refusal writes nothing, and enough to walk
+        a namespace to MAX_NOTES_PER_NS and lock it out until the next reap.
+      - The file can be created by somebody else *while we wait for the gate*. The waiter
+        then holds the gate over an overwrite, not a create, so it must not count either —
+        hence the second `path.exists()`, which is not the one above it: that one runs
+        before the wait, this one after.
     """
     if path.exists():
         yield
         return
     with _locked(gate):
+        if path.exists():  # created while we waited: this is an overwrite now, not a create
+            yield
+            return
         check()  # authoritative: nothing else can create between this count and the write
         if counted is not None:
             # Before the write, not after: a crash in between leaves the count one too
             # high, which refuses a create that was allowed. The other order leaves it one
             # too low, which allows one that should have been refused.
-            counted()
-        yield
+            counted(1)
+        try:
+            yield
+        finally:
+            # Exact rather than merely fail-closed: a reservation nothing was written
+            # against is given back. Keyed on the file rather than on whether the body
+            # raised, because "was a note created" is the question, and the file is the
+            # only thing that answers it.
+            if counted is not None and not path.exists():
+                counted(-1)
 
 
 def append(
@@ -1578,7 +1603,7 @@ def note_set(
             root / ".notes-create",
             path,
             lambda: _check_note_capacity(root, path),
-            lambda: _count_new_note(root, path.parent, len(value.encode("utf-8"))),
+            lambda d: _count_new_note(root, path.parent, len(value.encode("utf-8")), d),
         ),
         _locked(path),
     ):

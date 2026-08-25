@@ -50,6 +50,14 @@ the additions here are MINOR-shaped and carried on a patch number.
   every room on every request is a dictionary lookup: 6.6 ms → 5.1 ms at 1,200 rooms, which puts
   the walk within a sixth of its floor of one `stat()` per room. Note listings deliberately skip
   the cache so a large `/kv/<ns>` read cannot evict the room names.
+- **A refused write no longer counts as a note.** The create gate reserves a slot before the
+  body runs, and `?if=<value>` against a key that does not exist reaches its CAS check inside
+  that body — so a caller repeating one against fresh keys added a note to the totals every
+  time while creating none, for the price of a 409. Eight refused writes moved the counts by
+  eight. The reservation is given back now when nothing was written, and a waiter that gets
+  the gate after somebody else created the file no longer counts its overwrite either. Both
+  were bounded by the next reap; the per-namespace cap is small enough that the first could
+  lock a namespace out before then.
 - **`?limit=` no longer busts the `/rooms` cache.** The raw query value was the cache key while
   the walk behind it clamps to 200, so `?limit=200` and `?limit=1000000` are one reply and were
   two entries — a caller could force a full walk per request by incrementing a number, and evict

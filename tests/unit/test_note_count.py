@@ -210,6 +210,64 @@ def test_the_global_cap_binds_exactly_under_concurrent_processes(tmp_path) -> No
     assert store._note_count(root) == cap
 
 
+def test_a_refused_write_counts_nothing(tmp_path) -> None:
+    """The count is a reservation, and a reservation nothing was written against is given
+    back. `?if=<value>` against a key that does not exist reaches its CAS check *inside* the
+    create gate's body, so the gate has already counted by the time it raises — and a caller
+    can repeat that against fresh keys for free, since a refusal writes nothing. Left
+    uncorrected it walks a namespace to its cap and locks everyone out of it until the next
+    reap, which is a denial of service costing one 409 per slot taken.
+    """
+    import store
+
+    store.note_set(tmp_path, "did", "real", "v")
+    ns = tmp_path / "notes" / "did"
+    before = (store._note_count(tmp_path), store._note_totals(ns, store._ns_totals)[0])
+    assert before == (1, 1)
+
+    for i in range(5):  # if= against a key that was never written
+        with pytest.raises(store.StoreConflictError):
+            store.note_set(tmp_path, "did", f"ghost{i}", "v", expect="nope")
+    for _ in range(3):  # if_absent=1 against one that was
+        with pytest.raises(store.StoreConflictError):
+            store.note_set(tmp_path, "did", "real", "v", expect_absent=True)
+
+    after = (store._note_count(tmp_path), store._note_totals(ns, store._ns_totals)[0])
+    assert after == before, f"8 refused writes moved the counts {before} -> {after}"
+    assert len(list(ns.glob("*.txt"))) == 1, "…and none of them created a note"
+
+
+def test_racers_on_one_key_count_one_note(tmp_path) -> None:
+    """A waiter that gets the gate after somebody else created the file is holding it over
+    an *overwrite*. Counting there is the same bug in a different dress: eight racers, one
+    key, one file — and the totals have to say one, not eight."""
+    import threading
+
+    import store
+
+    # Seed first, then stamp the reap marker: on a *fresh* store several racers pass the
+    # reap throttle before the marker exists, and a reap rebuilds the global count from a
+    # walk without the count lock, so the totals would be racing a rebuild rather than each
+    # other. That drift is real, bounded by REAP_EVERY and self-healing; it is not what
+    # this test is about.
+    store.note_set(tmp_path, "did", "seed", "v")
+    (tmp_path / ".reaped").touch()
+    start = threading.Barrier(8)
+
+    def create(i):
+        start.wait()
+        store.note_set(tmp_path, "did", "same", f"v{i}")
+
+    threads = [threading.Thread(target=create, args=(i,)) for i in range(8)]
+    [t.start() for t in threads]
+    [t.join() for t in threads]
+
+    ns = tmp_path / "notes" / "did"
+    assert sorted(p.stem for p in ns.glob("*.txt")) == ["same", "seed"]
+    assert store._note_count(tmp_path) == 2, "eight writes to one key are one note"
+    assert store._note_totals(ns, store._ns_totals)[0] == 2
+
+
 def test_a_reap_frees_a_namespace_that_had_filled(tmp_path, monkeypatch) -> None:
     """The failure a cached per-namespace count could cause, and the reason the reap drops
     every one of them rather than rewriting them.
