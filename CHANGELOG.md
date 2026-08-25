@@ -22,9 +22,19 @@ of the contract, not an implementation detail: agents parse it.
   the ~100k sharded identity notes it is being asked to. Worst-case note disk goes 320 MiB → 1.25
   GiB against the unchanged 5 GiB room budget, so a volume sized for rooms still covers it; the
   per-namespace cap (5120) and every route and response shape are unchanged.
-- Operators should note the cost is walks, not disk: `/rooms` reports note usage from an
-  O(cap) walk, so its worst case rises 4x with the cap. It is served from a cache keyed on the
-  note-write counter, which a sustained note flood invalidates per write.
+### Fixed
+
+- **`/rooms` no longer walks the note store.** The note gauge stat()ed every note on every
+  call — 124 ms at the old cap, 480 ms at the new one — and the cache in front of it is keyed
+  on the note-write counter, so a note flood invalidated it per write and the walk ran per
+  request. It reads a cached count and byte total instead (~0.1 ms), maintained by the create
+  path and re-established by the reaper. `notes.total` is unchanged; `notes.bytes` now tracks
+  creates and settles overwrites at the next reap, so it can read low for up to
+  `CHAT_REAP_EVERY` after a note changes length. Nothing is enforced against it — the cap is
+  on the count.
+- **A note create scans its namespace once, not twice.** The capacity check ran before the
+  create gate and again inside it. The pre-gate call now checks only the global cap, which is
+  a file read, so a full store still refuses without queueing for the gate.
 
 ## [0.9.0] - 2026-08-25
 

@@ -81,12 +81,18 @@ def test_the_count_survives_a_lost_file_by_walking(tmp_path) -> None:
     (tmp_path / store.NOTES_FILE).write_text("not a number")
     assert store._note_count(tmp_path) == 5, "a malformed count must be rebuilt by walking"
 
-    (tmp_path / store.NOTES_FILE).write_text("-3")
+    (tmp_path / store.NOTES_FILE).write_text("-3 0")
     assert store._note_count(tmp_path) == 5, "a negative count must be rebuilt by walking"
+
+    # A file from a build that stored only the count must not be read as if it had bytes:
+    # it fails to parse, so it is walked. The same degradation, never a wrong number.
+    (tmp_path / store.NOTES_FILE).write_text("5")
+    assert store._note_count(tmp_path) == 5, "an old short format must be rebuilt by walking"
 
     store.note_set(tmp_path, "ns0", "another", "v")
     assert store._note_count(tmp_path) == 6
-    assert int((tmp_path / store.NOTES_FILE).read_text()) == 6
+    stored, _ = (tmp_path / store.NOTES_FILE).read_text().split()
+    assert int(stored) == 6
 
 
 def test_a_reap_reconciles_a_drifted_count(tmp_path, monkeypatch) -> None:
@@ -96,7 +102,7 @@ def test_a_reap_reconciles_a_drifted_count(tmp_path, monkeypatch) -> None:
     import store
 
     _seed(tmp_path, 3)
-    (tmp_path / store.NOTES_FILE).write_text("999")
+    (tmp_path / store.NOTES_FILE).write_text("999 0")
     assert store._note_count(tmp_path) == 999, "premise: the bogus count is being read"
 
     monkeypatch.setattr(store, "REAP_EVERY", 0)  # due now, rather than in five minutes
@@ -172,7 +178,7 @@ def test_the_global_cap_binds_exactly_under_concurrent_processes(tmp_path) -> No
         assert worker.returncode == 0, f"worker failed: {err}"
         accepted += json.loads(out)
 
-    on_disk = store._count_notes(root)
+    on_disk, _ = store._count_notes(root)
     assert on_disk == accepted, "every accepted write must be a note that exists"
     assert on_disk == cap, f"cap is {cap}, store holds {on_disk}"
     # …and the file agrees with the disk, or the next process starts from a wrong number.
@@ -245,7 +251,7 @@ def test_the_cached_count_survives_reap_and_create_interleaving(tmp_path, monkey
         # Nothing here is IDLE_SECONDS old, so a reap deletes nothing and the walk it writes
         # must agree with the increments — a reap is not allowed to lose a concurrent create.
         assert store._note_count(tmp_path) == expected, f"after reap {round_}"
-        assert store._count_notes(tmp_path) == expected, "and the file must match the disk"
+        assert store._count_notes(tmp_path)[0] == expected, "and it must match the disk"
 
 
 def test_a_stale_cache_over_admits_by_at_most_the_drift_a_reap_clears(
@@ -271,7 +277,7 @@ def test_a_stale_cache_over_admits_by_at_most_the_drift_a_reap_clears(
 
     # Lose `drift` increments. The reap marker is fresh from the seeding above, so nothing
     # reconciles until the reap this test runs itself — which is the window being measured.
-    (tmp_path / store.NOTES_FILE).write_text(str(cap - drift))
+    (tmp_path / store.NOTES_FILE).write_text(f"{cap - drift} 0")
     admitted = 0
     for i in range(drift + 5):
         try:
@@ -280,7 +286,7 @@ def test_a_stale_cache_over_admits_by_at_most_the_drift_a_reap_clears(
         except store.StoreError:
             break
     assert admitted == drift, f"drift of {drift} admitted {admitted} — the overshoot is unbounded"
-    assert store._count_notes(tmp_path) == cap + drift
+    assert store._count_notes(tmp_path)[0] == cap + drift
 
     # …and the interval ends. The reap walks, writes the real figure, and the cap is hard
     # again at a store that is now genuinely over it.
@@ -289,3 +295,47 @@ def test_a_stale_cache_over_admits_by_at_most_the_drift_a_reap_clears(
     assert store._note_count(tmp_path) == cap + drift
     with pytest.raises(store.StoreError, match="across all namespaces"):
         store.note_set(tmp_path, "ns-after-reap", "k", "v")
+
+
+def test_note_stats_does_not_walk_the_store(tmp_path, monkeypatch) -> None:
+    """The /rooms hotspot, pinned as a property rather than a timing.
+
+    note_stats stat()ed every note on every call — 124 ms at the old 40960 cap, 480 ms at
+    163840 on tmpfs — and the app-level cache in front of it keys on the note-write
+    counter, so a note flood invalidated it per write and the walk ran per request at
+    exactly the worst moment. It must read files, not directories, at any store size.
+    """
+    import store
+
+    _seed(tmp_path, 12)
+    (tmp_path / ".reaped").touch()  # reap is throttled; measure the read path, not a reap
+    reads = _scandir_calls(monkeypatch, lambda: store.note_stats(tmp_path))
+    assert reads == 0, f"note_stats opened {reads} directories, expected none"
+
+    walked = store._count_notes(tmp_path)
+    assert store.note_stats(tmp_path)["total"] == walked[0]
+    assert store.note_stats(tmp_path)["bytes"] == walked[1], "cheap must still mean correct"
+
+
+def test_the_byte_gauge_tracks_creates_and_a_reap_settles_overwrites(tmp_path, monkeypatch):
+    """What the byte total costs now that it is not measured per request.
+
+    Creates carry it — they already hold the gate, so the size rides along. Overwrites do
+    not: they never take the gate, and adding a lock to the overwrite path to keep a
+    display figure exact is the trade the source declines. So a note that changes length
+    leaves the gauge stale until the next reap, which is the same deal room bytes already
+    make, and it is affordable because nothing is enforced against this number — the cap
+    is on the count.
+    """
+    import store
+
+    store.note_set(tmp_path, "ns0", "k", "hello")
+    assert store.note_stats(tmp_path)["bytes"] == 5, "a create must carry its own size"
+
+    store.note_set(tmp_path, "ns0", "k", "much longer value")
+    assert store.note_stats(tmp_path)["bytes"] == 5, "an overwrite leaves the gauge stale"
+    assert store._count_notes(tmp_path)[1] == 17, "premise: the disk really did change"
+
+    monkeypatch.setattr(store, "REAP_EVERY", 0)
+    store._reap(tmp_path)
+    assert store.note_stats(tmp_path)["bytes"] == 17, "and a reap settles it"

@@ -614,9 +614,12 @@ _note_stats_cache: tuple[tuple, float, dict] | None = None
 def _note_stats() -> dict:
     """store.note_stats through its own cache: the note gauge changes only when a note
     is written or reaped, while the rooms walk is stale on every message. Fused, the
-    note walk re-ran per message; the clock only bounds reaper deletions. That walk is
-    O(MAX_NOTES_TOTAL) — 164k stats at the cap since it went to 32 * MAX_ROOMS, up from
-    41k — so this cache is what keeps the bigger note store off the /rooms path."""
+    note gauge re-ran per message; the clock only bounds reaper deletions.
+
+    This used to be load-bearing rather than merely useful: store.note_stats stat()ed every
+    note, so a miss here cost 480 ms at the cap. It reads two integers now, and this cache
+    saves a file read. Keep it anyway — the stamp is what makes a second worker's write
+    visible here — but it is no longer the thing standing between /rooms and the store."""
     global _note_stats_cache
     stamp = (store.counters(config.ROOT)["notes_written"], config.ROOT)
     now = time.monotonic()
