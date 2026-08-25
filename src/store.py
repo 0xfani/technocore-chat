@@ -1429,8 +1429,16 @@ def _last_nonce(root: Path, room: str, did: str) -> int | None:
     path = room_path(root, room)
     if not path.exists():
         return None
+    # Bytes-level reject before the parse. This is a predicate scan, not a tail read: when
+    # the DID has not posted recently it walks the whole budget and parses every record only
+    # to discard it. No false negatives — a record whose `from` is this DID contains the DID
+    # literally. A false positive (the DID quoted in message text) falls through to the full
+    # parse below, which is the only thing that tells `from` from a mention.
+    did_b = did.encode()
     with path.open("rb") as f:
         for raw in reverse_lines(f):
+            if did_b not in raw:
+                continue
             rec = _parse(raw)
             if rec is not None and rec.get("from") == did and isinstance(rec.get("nonce"), int):
                 return rec["nonce"]
