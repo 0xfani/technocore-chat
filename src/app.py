@@ -673,10 +673,17 @@ def rooms(request: Request) -> Response:
     if retry:
         return limit.limited("read", RATE_READ, retry, text=text, max_wait=MAX_WAIT)
     q = request.query_params
-    view = _rooms_view(_cursor(q.get("limit"), 50))
+    # Clamped here rather than only inside room_stats, because this number is the cache
+    # key: ?limit=200 and ?limit=1000000 are one reply and were two entries, so a caller
+    # incrementing it walked every room on every request and evicted everyone else's view
+    # out of a 64-entry cache while doing it. Now the key space is the reply space.
+    view = _rooms_view(min(_cursor(q.get("limit"), 50) or 1, store.MAX_LIMIT))
+    n = view["notes"]
+    # Both note caps, for the reason the room head prints both of its own: either can be the
+    # one that refuses the next write, and the per-namespace figure moves per deployment.
     notes_line = (
-        f"# notes {view['notes']['total']} of {view['notes']['capacity']} "
-        f"({_size(view['notes']['bytes'])} total, namespaces not listed)"
+        f"# notes {n['total']} of {n['capacity']} ({_size(n['bytes'])} total, "
+        f"{n['capacity_per_namespace']} per namespace, namespaces not listed)"
     )
     if not view["total"]:
         body = "(no rooms yet — GET /r/<name>/say/<nick>/<text> creates one)\n" + notes_line

@@ -27,6 +27,9 @@ PROBE = (
     "import json, app, config, limit, store; "
     "print(json.dumps({"
     "'config.MAX_ROOMS': config.MAX_ROOMS, 'store.MAX_ROOMS': store.MAX_ROOMS, "
+    "'config.MAX_NOTES_PER_NS': config.MAX_NOTES_PER_NS, "
+    "'store.MAX_NOTES_PER_NS': store.MAX_NOTES_PER_NS, "
+    "'store.MAX_NOTES_TOTAL': store.MAX_NOTES_TOTAL, "
     "'config.MAX_WAITERS_TOTAL': config.MAX_WAITERS_TOTAL, "
     "'limit.MAX_WAITERS_TOTAL': limit.MAX_WAITERS_TOTAL, "
     "'app.MAX_WAITERS_TOTAL': app.MAX_WAITERS_TOTAL, "
@@ -49,10 +52,11 @@ def boot(**env: str) -> dict:
 
 
 def test_the_new_knobs_default_to_the_values_they_replaced() -> None:
-    """An instance that sets nothing does not move. These three numbers were hardcoded
-    before 0.9.0, and every deployment already running is that instance."""
+    """An instance that sets nothing does not move. Each of these was hardcoded before the
+    release that made it a knob, and every deployment already running is that instance."""
     values = boot()
     assert values["config.MAX_ROOMS"] == 5120
+    assert values["config.MAX_NOTES_PER_NS"] == 5120  # = MAX_ROOMS, the number it replaced
     assert values["config.MAX_WAITERS_TOTAL"] == 64
     assert values["config.MAX_WAITERS_PER_IP"] == 4
     assert values["config.WORKERS"] == 1  # no WEB_CONCURRENCY set
@@ -64,11 +68,15 @@ def test_the_environment_moves_them_at_every_binding_site() -> None:
     so a knob that stopped at `config` would parse cleanly and change nothing."""
     values = boot(
         CHAT_MAX_ROOMS="99",
+        CHAT_MAX_NOTES_PER_NS="400",
         CHAT_MAX_WAITERS_TOTAL="7",
         CHAT_MAX_WAITERS_PER_IP="2",
         WEB_CONCURRENCY="3",
     )
     assert values["config.MAX_ROOMS"] == values["store.MAX_ROOMS"] == 99
+    # Its own knob now, so the two move independently — and the per-namespace cap reaches
+    # `store`, which is the module `_check_note_capacity` enforces it from.
+    assert values["config.MAX_NOTES_PER_NS"] == values["store.MAX_NOTES_PER_NS"] == 400
     for module in ("config", "limit", "app"):
         assert values[f"{module}.MAX_WAITERS_TOTAL"] == 7
         assert values[f"{module}.MAX_WAITERS_PER_IP"] == 2
@@ -86,6 +94,43 @@ def test_the_floors_hold() -> None:
     floored = boot(CHAT_MAX_WAITERS_TOTAL="-1", CHAT_MAX_WAITERS_PER_IP="-1")
     assert floored["config.MAX_WAITERS_TOTAL"] == 0
     assert floored["config.MAX_WAITERS_PER_IP"] == 0
+    # MAX_NOTES_PER_NS floors at MAX_ROOMS rather than at a literal, and that floor is an
+    # invariant and not a typo guard: the four reserved namespaces (topic, room-owners,
+    # room-allow, room-nonce) hold one note per room each, so anything under MAX_ROOMS means
+    # some room cannot carry a topic or an owner. A value below it clamps up, silently and on
+    # purpose — the alternative is refusing to boot over a setting whose intent was "smaller".
+    assert boot(CHAT_MAX_NOTES_PER_NS="1")["config.MAX_NOTES_PER_NS"] == 5120
+    assert boot(CHAT_MAX_NOTES_PER_NS="-5")["config.MAX_NOTES_PER_NS"] == 5120
+    clamped = boot(CHAT_MAX_ROOMS="99", CHAT_MAX_NOTES_PER_NS="10")
+    assert clamped["config.MAX_NOTES_PER_NS"] == 99  # the floor follows MAX_ROOMS, not 5120
+
+
+def test_the_per_namespace_note_cap_moves_without_dragging_the_others() -> None:
+    """The whole point of the knob: today the only lever on a full namespace is
+    CHAT_MAX_ROOMS, which moves three caps to fix one — the room count, the global note cap
+    derived from it, and this. Raised on its own it must widen ONE namespace's share and
+    leave the store's total where it was, so the global cap still binds above it."""
+    base, widened = boot(), boot(CHAT_MAX_NOTES_PER_NS="20480")
+    assert widened["config.MAX_NOTES_PER_NS"] == 20480 == 4 * base["config.MAX_NOTES_PER_NS"]
+    assert widened["config.MAX_ROOMS"] == base["config.MAX_ROOMS"]
+    assert widened["store.MAX_NOTES_TOTAL"] == base["store.MAX_NOTES_TOTAL"]
+    # Still the outer bound: one namespace may now take 12.5% of the store instead of 3.1%,
+    # which is the cost the knob buys, but it cannot take more than the store holds.
+    assert widened["store.MAX_NOTES_TOTAL"] > widened["config.MAX_NOTES_PER_NS"]
+
+
+def test_junk_in_the_new_knob_refuses_to_boot() -> None:
+    """`int()` again: a per-namespace cap that silently fell back to its default would leave
+    an operator raising it during an incident believing they had."""
+    clean = {k: v for k, v in os.environ.items() if not k.startswith("CHAT_")}
+    run = subprocess.run(
+        [sys.executable, "-c", PROBE],
+        capture_output=True,
+        text=True,
+        env={**clean, "CHAT_MAX_NOTES_PER_NS": "plenty"},
+    )
+    assert run.returncode != 0, "app booted with a non-numeric CHAT_MAX_NOTES_PER_NS"
+    assert "ValueError" in run.stderr
 
 
 def test_junk_refuses_to_boot() -> None:

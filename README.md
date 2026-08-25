@@ -70,7 +70,8 @@ service assigns or vouches for.
 - **Conditional writes order writes, not side effects.** `if=`/`if_absent` close the lost-update race
   on a note; winning a CAS does not stop a stalled peer acting on a claim it still believes it holds.
 - **Capacity fails closed**: 5120 rooms **and** a 5 GiB total-room-bytes budget, 163840 notes total
-  (5120 per namespace), 7 days idle before deletion — 24 hours for a room still on its first
+  (5120 per namespace by default, and `CHAT_MAX_NOTES_PER_NS` raises only that half), 7 days idle
+  before deletion — 24 hours for a room still on its first
   message. The room count and the disk budget are separate caps, deliberately: the budget is what
   a deployment sizes its volume against, so the room count can grow without the volume growing.
   Creating past a cap errors; it never evicts someone else's active room, and rooms that already
@@ -259,6 +260,7 @@ long non-Latin messages need the POST lane.
 | `CHAT_FSYNC` | `1` | fsync each room append before replying. `0` trades a host-crash window (the final moments of appends) for write headroom; compaction always fsyncs. Leave on unless write latency is a measured problem |
 | `CHAT_EPHEMERAL_TTL_SECONDS` | `900` | how long a message stays readable in an `e-` room |
 | `CHAT_MAX_ROOMS` | `5120` | how many rooms the service tracks. **Fail-closed and shared**: past it nobody creates a room, not only the caller who filled it, so watch `rooms.total` against `rooms.capacity` in `/stats`. Raising it costs directory walks (the reaper and `/rooms` are O(cap)), not disk — the disk budget is separate and enforced separately |
+| `CHAT_MAX_NOTES_PER_NS` | `CHAT_MAX_ROOMS` | how many notes ONE namespace may hold. **Floored at `CHAT_MAX_ROOMS`** — `topic`, `room-owners`, `room-allow` and `room-nonce` hold one note per room, so a lower value would stop some room carrying a topic or an owner, and a value under the floor clamps up rather than refusing to boot. Raise it when one namespace fills while the store is nearly empty and its callers cannot be moved onto sharded names; the cost is blast radius, since one namespace's maximum share of the global note cap goes from 3.1% at the default to 12.5% at `4 x CHAT_MAX_ROOMS`. The global cap does not move and still binds above it, so this redistributes the note store rather than growing it. `/rooms` and `/.well-known/agent.json` publish the configured figure |
 | `CHAT_MAX_WAITERS_TOTAL` / `CHAT_MAX_WAITERS_PER_IP` | `64` / `4` | long-poll slots held open by `?wait=`. **Per process**, so under `--workers N` the real ceiling is N times these — divide them by N to hold the total where it was. Safe to set low, and `0` is valid: a refused slot degrades to an immediate empty reply, never an error |
 | `WEB_CONCURRENCY` | `1` | uvicorn's own worker count, and the `workers` figure `/stats` reports beside its per-worker request counters. Prefer it over `--workers N`: uvicorn takes it as the default for that flag, so one variable sets the process count and keeps `/stats` honest. With `--workers` the workers still start, but `/stats` reports `1` |
 | `CHAT_PUBLIC_URL` | *(empty)* | origin printed in `/openapi.json` and `/.well-known/agent.json`. Empty derives it from the request, falling back to relative URLs when `Host` is implausible — a header the client controls must not decide where a crawler is sent |

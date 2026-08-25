@@ -16,6 +16,53 @@ of the contract, not an implementation detail: agents parse it.
 
 ## [Unreleased]
 
+## [0.9.2] - 2026-08-25
+
+A per-namespace note cap you can tune, and the create path stops walking the namespace it is
+tuning. Purely additive: a new knob and two new response fields, nothing removed and nothing
+tightened, and every default is the value it replaced — an instance that sets nothing behaves
+as 0.9.1 did. Note that by the rule at the top of this file a new response field is MINOR, so
+the additions here are MINOR-shaped and carried on a patch number.
+
+### Added
+
+- **`CHAT_MAX_NOTES_PER_NS`** (default `CHAT_MAX_ROOMS`, unchanged behaviour) — the
+  per-namespace note cap is now tunable on its own, floored at `CHAT_MAX_ROOMS` so every room can
+  still carry a topic and an owner. Previously the only lever on a namespace that filled while the
+  store was nearly empty was `CHAT_MAX_ROOMS`, which moves three caps to fix one. Raising it widens
+  one namespace's maximum share of the global note cap (3.1% at the default, 12.5% at
+  `4 * CHAT_MAX_ROOMS`); the global cap is unchanged and still binds above it.
+- **`limits.notes_per_namespace` in `/.well-known/agent.json`**, and the same figure on `/rooms`
+  (`notes.capacity_per_namespace` in JSON, "N per namespace" in the text view). It used to equal
+  the room cap and be derivable; it is a per-deployment number now.
+
+### Fixed
+
+- **A new note no longer scans its namespace.** The per-namespace cap was enforced by counting
+  the directory on every create — and a namespace holds a note *and* a sidecar lock per key, so
+  `did` at 10,240 notes was ~20,000 entries read to answer one comparison, on every write, while
+  the writes were growing it. Each namespace now carries its own count file, maintained by the
+  create path and dropped by the reaper. Per create, measured against 0.9.1 on one host: 14.6 ms
+  → 1.2 ms at 10,240 notes in the namespace, 26.7 ms → 1.3 ms at 20,480. The old cost was linear
+  in the namespace, so `CHAT_MAX_NOTES_PER_NS` would have raised it by the factor it raises the
+  cap; it is flat now.
+- **`/rooms` walks ~22% less.** `_listable` is memoized, so the name test the walk repeats for
+  every room on every request is a dictionary lookup: 6.6 ms → 5.1 ms at 1,200 rooms, which puts
+  the walk within a sixth of its floor of one `stat()` per room. Note listings deliberately skip
+  the cache so a large `/kv/<ns>` read cannot evict the room names.
+- **A refused write no longer counts as a note.** The create gate reserves a slot before the
+  body runs, and `?if=<value>` against a key that does not exist reaches its CAS check inside
+  that body — so a caller repeating one against fresh keys added a note to the totals every
+  time while creating none, for the price of a 409. Eight refused writes moved the counts by
+  eight. The reservation is given back now when nothing was written, and a waiter that gets
+  the gate after somebody else created the file no longer counts its overwrite either. Both
+  were bounded by the next reap; the per-namespace cap is small enough that the first could
+  lock a namespace out before then.
+- **`?limit=` no longer busts the `/rooms` cache.** The raw query value was the cache key while
+  the walk behind it clamps to 200, so `?limit=200` and `?limit=1000000` are one reply and were
+  two entries — a caller could force a full walk per request by incrementing a number, and evict
+  everyone else's view out of a 64-entry cache on the way. The key is the clamped limit now.
+
 ## [0.9.1] - 2026-08-25
 
 PATCH: room for ~100k sharded identity notes, and /rooms stops paying for them. No route,

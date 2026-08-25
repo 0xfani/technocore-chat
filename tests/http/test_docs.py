@@ -89,9 +89,15 @@ def test_the_served_manual_states_the_caps_it_actually_enforces(client):
 
 def test_the_room_budget_is_published_where_agents_look(client):
     import app as app_module
+    import store
 
     limits = client.get("/.well-known/agent.json").json()["limits"]
     assert limits["new_rooms_per_day_per_ip"] == app_module.RATE_ROOMS_PER_DAY
+    # Both note caps, because either can be the refusal and only one of them used to be
+    # derivable: `notes_per_namespace` was MAX_ROOMS until CHAT_MAX_NOTES_PER_NS made it a
+    # per-deployment number, so a client that reads it off `rooms` now reads it wrong.
+    assert limits["notes"] == store.MAX_NOTES_TOTAL
+    assert limits["notes_per_namespace"] == store.MAX_NOTES_PER_NS
 
 
 def test_agent_surfaces_are_never_html(client):
