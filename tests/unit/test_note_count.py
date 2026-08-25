@@ -13,6 +13,7 @@ import json
 import os
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -61,9 +62,33 @@ def test_a_new_note_reads_the_same_number_of_directories_at_any_store_size(
     fresh = store.note_path(root, "ns0", "brand-new")
     reads = _scandir_calls(monkeypatch, lambda: store._check_note_capacity(root, fresh))
     (tmp_path / f"reads{namespaces}.txt").write_text(str(reads))
-    # One directory: the caller's own namespace, for the per-namespace cap. The global cap
-    # reads a file instead of walking. Two would already mean the global walk is back.
-    assert reads == 1, f"{namespaces} namespaces cost {reads} directory reads, expected 1"
+    # Zero directories, at any store size. Both caps read a file: the global one at the
+    # root, the per-namespace one inside the namespace. It was 1 — the caller's own
+    # namespace — which read as cheap beside the global walk it replaced and was not, since
+    # a namespace is exactly what MAX_NOTES_PER_NS lets grow. Any number above 0 here is a
+    # walk that came back, and it is the *shape* that matters: 1 scales with the namespace.
+    assert reads == 0, f"{namespaces} namespaces cost {reads} directory reads, expected 0"
+
+
+def test_the_per_namespace_count_is_rebuilt_once_and_then_stays_free(tmp_path, monkeypatch):
+    """The count file is not durable state: `_reap` drops every one of them, because a
+    deletion pass is the only thing that can make one wrong. So the shape a flood actually
+    sees is one rebuild scan per namespace per reap interval, then nothing — not one scan
+    per create, and never a count that outlived the notes it counted.
+    """
+    import store
+
+    store.note_set(tmp_path, "did", "seed", "v")
+    ns = tmp_path / "notes" / "did"
+    fresh = store.note_path(tmp_path, "did", "brand-new")
+
+    (ns / store.NOTES_FILE).unlink()  # what a reap leaves behind
+    rebuild = _scandir_calls(monkeypatch, lambda: store._check_note_capacity(tmp_path, fresh))
+    assert rebuild == 1, "a dropped count must be rebuilt by scanning that namespace once"
+    assert (ns / store.NOTES_FILE).exists(), "…and the rebuild must be persisted"
+
+    cached = _scandir_calls(monkeypatch, lambda: store._check_note_capacity(tmp_path, fresh))
+    assert cached == 0, "every create after the rebuild is a file read"
 
 
 def test_the_count_survives_a_lost_file_by_walking(tmp_path) -> None:
@@ -183,6 +208,71 @@ def test_the_global_cap_binds_exactly_under_concurrent_processes(tmp_path) -> No
     assert on_disk == cap, f"cap is {cap}, store holds {on_disk}"
     # …and the file agrees with the disk, or the next process starts from a wrong number.
     assert store._note_count(root) == cap
+
+
+def test_a_reap_frees_a_namespace_that_had_filled(tmp_path, monkeypatch) -> None:
+    """The failure a cached per-namespace count could cause, and the reason the reap drops
+    every one of them rather than rewriting them.
+
+    A count that outlived the notes it counted would hold a namespace at its cap forever:
+    the notes are gone, the directory is empty, and every create is still refused against a
+    number describing a store that no longer exists. Nothing recovers from that but an
+    operator deleting a file they have never been told about.
+    """
+    import store
+
+    monkeypatch.setattr(store, "MAX_NOTES_PER_NS", 2)
+    store.note_set(tmp_path, "did", "a", "v")
+    store.note_set(tmp_path, "did", "b", "v")
+    with pytest.raises(store.StoreError, match=r"note limit reached \(2 is the cap"):
+        store.note_set(tmp_path, "did", "c", "v")
+    assert (tmp_path / "notes" / "did" / store.NOTES_FILE).exists(), "the count is cached"
+
+    # Age both notes past the idle rule and let the next write run a pass.
+    old = time.time() - store.IDLE_SECONDS - 60
+    for note in (tmp_path / "notes" / "did").glob("*.txt"):
+        os.utime(note, (old, old))
+    monkeypatch.setattr(store, "REAP_EVERY", 0)
+    store.note_set(tmp_path, "elsewhere", "k", "v")  # any write; the reap rides the path
+
+    assert not (tmp_path / "notes" / "did" / store.NOTES_FILE).exists(), "reaped, so dropped"
+    store.note_set(tmp_path, "did", "c", "v")  # the slots the reaper freed are usable again
+    assert store.note_get(tmp_path, "did", "c") == "v"
+
+
+def test_the_per_namespace_cap_holds_under_concurrent_creates(tmp_path, monkeypatch) -> None:
+    """The global cap has this test already; the per-namespace one now reads a cached count
+    too, so it needs the same proof. Racers all aim at ONE namespace, so the per-namespace
+    cap is what refuses them, and the count they race on is the file rather than a walk.
+    """
+    import threading
+
+    import store
+
+    monkeypatch.setattr(store, "MAX_NOTES_PER_NS", 4)
+    real_check = store._check_note_capacity
+
+    def slow_check(root, path):
+        real_check(root, path)
+        time.sleep(0.02)  # widen the count->write window every racer must lose
+
+    monkeypatch.setattr(store, "_check_note_capacity", slow_check)
+    start = threading.Barrier(8)
+
+    def create(i):
+        start.wait()
+        try:
+            store.note_set(tmp_path, "did", f"k{i}", "v")
+        except store.StoreError:
+            pass
+
+    threads = [threading.Thread(target=create, args=(i,)) for i in range(8)]
+    [t.start() for t in threads]
+    [t.join() for t in threads]
+
+    on_disk = len(list((tmp_path / "notes" / "did").glob("*.txt")))
+    assert on_disk == 4, f"cap is 4, namespace holds {on_disk}"
+    assert store._note_totals(tmp_path / "notes" / "did", store._ns_totals)[0] == 4
 
 
 def test_the_global_cap_is_sized_against_the_disk_it_costs(tmp_path) -> None:

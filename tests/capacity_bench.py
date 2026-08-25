@@ -64,6 +64,26 @@ the cost that change removed rather than a cost anyone still pays:
       GET  /r/<room>/say/...             ~25 ms   sync endpoint: Starlette threadpools it
       POST /r/<room>                     ~11 ms   was ~385 ms before it was threadpooled
 
+Measured 2026-08-25 for 0.9.2, on the same container (tmpfs), against the 0.9.1 code in the
+same alternating run so host drift cancels. This one varies ONE namespace rather than the
+store, which is the axis the block above never moved — its "flat at 0.3 ms across 4k, 14k
+and 28k notes" spread those notes over many namespaces, so the per-namespace scan it was
+timing never grew. Concentrate them, as the `did` namespace does in production, and the
+shape it was reading as flat is a line:
+
+  store, per NEW note into ONE namespace (with a sidecar lock per note, as production has):
+    notes in namespace     0.9.1      0.9.2
+             1,000       3.70 ms    3.31 ms    1.1x
+             4,000       7.26 ms    1.25 ms    5.8x
+            10,240      14.58 ms    1.21 ms   12.1x   production's `did` at the time
+            20,480      26.67 ms    1.32 ms   20.2x   4 * MAX_ROOMS, a widened namespace
+    0.9.1 is linear in the namespace, 0.9.2 is flat: the count comes from that namespace's
+    own count file, so the create path reads two numbers and walks nothing. What is left is
+    ~14 open()s and 4 atomic replaces per create, none of which scale with anything
+  store, per /rooms request if uncached, 1,200 rooms:
+    room_stats(limit=50)  6.61 ms -> 5.14 ms   memoizing `_listable`; the walk is now within
+                                               a sixth of its floor of one stat() per room
+
 The two numbers worth watching are the last pair. A sync handler costs the loop nothing
 because Starlette runs it in a threadpool; an `async def` handler that calls blocking store
 code stalls every other request for the duration, and at a full store that duration is the

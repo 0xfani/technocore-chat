@@ -121,9 +121,14 @@ MAX_ROOMS = max(1, int(os.environ.get("CHAT_MAX_ROOMS", "5120")))
 # The cost is blast radius, which is why this is a knob and not a new default: one namespace's
 # maximum share of MAX_NOTES_TOTAL is 3.1% at the default and 12.5% at 4 * MAX_ROOMS. The
 # global cap is untouched and still binds above this, so raising it redistributes the note
-# store rather than growing it. The other half of the old objection — that a bigger
-# per-namespace cap meant a bigger walk — went away in 0.9.1: the gauge is cached and a create
-# does one unsized scandir of the caller's own namespace.
+# store rather than growing it.
+#
+# It costs no walk, which was not quite true when the knob landed. 0.9.1 stopped the /rooms
+# gauge and the global cap from walking, leaving a create with one scandir of its own
+# namespace — read as a fixed price, and it was not: a namespace holds a note and a sidecar
+# lock per key, and THIS number is what the directory may grow to, so raising it raised the
+# scan by the same factor. 0.9.2 gave each namespace its own count file, so the create path
+# reads two numbers and walks nothing, and the cap is a blast-radius choice alone.
 MAX_NOTES_PER_NS = max(MAX_ROOMS, int(os.environ.get("CHAT_MAX_NOTES_PER_NS", MAX_ROOMS)))
 # Long-poll waiter slots, globally and per IP. Per *process*, so under `--workers N` the
 # real ceiling is N times these — which is the reason they are knobs at all: an operator

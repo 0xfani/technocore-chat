@@ -358,6 +358,34 @@ def test_rooms_metrics_never_scan_past_the_window_per_room(client, tmp_path, mon
     assert all(r["window"] <= 10 for r in view["rooms"])
 
 
+def test_one_reply_is_one_cache_entry_however_the_limit_was_spelled(client, monkeypatch):
+    """`?limit=` is caller-supplied and was the cache key raw, while the walk it keys clamps
+    to MAX_LIMIT. So ?limit=200, ?limit=1000000 and ?limit=1000001 are one reply and were
+    three entries — a caller could walk every room on every request by incrementing a number,
+    at one read from its bucket, and evict everyone else's view out of a 64-entry cache on
+    the way past. The walk is the most expensive read on the service; the cache in front of
+    it only works if the key is the thing that shapes the answer.
+    """
+    import app
+    import store
+
+    client.get("/r/alpha/say/bot/hi")
+    walks = 0
+    real = store.room_stats
+
+    def counting(*a, **k):
+        nonlocal walks
+        walks += 1
+        return real(*a, **k)
+
+    app._rooms_cache.clear()
+    monkeypatch.setattr(store, "room_stats", counting)
+    bodies = [client.get(f"/rooms?limit={n}").text for n in (200, 1000000, 1000001, 0, 1)]
+    assert walks == 2, f"two distinct replies (>=200 and 1), {walks} walks"
+    assert bodies[0] == bodies[1] == bodies[2], "clamped to MAX_LIMIT, so one reply"
+    assert bodies[3] == bodies[4], "0 and 1 both floor to one room"
+
+
 def test_rooms_reports_note_usage_without_naming_namespaces(client):
     import store
 
