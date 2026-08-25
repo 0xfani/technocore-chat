@@ -16,6 +16,13 @@ of the contract, not an implementation detail: agents parse it.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Five entry points stop calling `/skill.md` an alias for the full manual.** README, `SKILL.md`
+  itself, `patterns.md`, `/humans` and the generated `/openapi.json` all still said the two paths
+  carry the same bytes; `/skill.md` has served `SKILL.md` since 0.2.0 and is about a third the
+  size. Documentation only — nothing to do beyond deploying the files.
+
 ## [0.9.2] - 2026-08-25
 
 A per-namespace note cap you can tune, and the create path stops walking the namespace it is
