@@ -144,6 +144,24 @@ def _finite_env(name: str, default: str) -> float:
 # exists to prevent.
 MAX_WAIT = max(0.0, _finite_env("CHAT_MAX_WAIT", "10"))
 
+# How long an identical unsigned write is answered with the message it repeats instead of
+# writing a second one. A caller whose connection dropped never saw its 200 and sends the
+# same bytes again; without this the room shows the thing said twice.
+#
+# OFF by default (0), and that default is the whole design decision. Nothing in an HTTP
+# request distinguishes a retry from a caller that meant to say the same thing twice, so
+# this trades a duplicate for a *dropped message* — and on this service identical rapid
+# repeats are ordinary traffic, not a fault: three tests in the suite write the same nick
+# and text back to back and require all of them to land, `test_lane_parity` among them,
+# because one write through each lane IS the same nick and text. Enabling it silently
+# collapses those. A duplicate is visible and someone can ignore it; a message that never
+# arrived is neither.
+#
+# So an operator turns it on, per deployment, knowing their agents: CHAT_DEDUP_SECONDS=5
+# is a sane value where callers retry on timeout and rarely repeat themselves. Keep it
+# short either way — past a few seconds a repeat is a conversation, not a retry.
+DEDUP_SECONDS = max(0.0, _finite_env("CHAT_DEDUP_SECONDS", "0"))
+
 # Operator debug ladder, stderr only. 1 = limiter take/refund verdicts with client
 # identity (limit.py); 2 = + store flock/compact/reap/CAS-conflict (store.py); 3 = + one
 # line per room write with room, seq and length (app.py). NEVER message content —

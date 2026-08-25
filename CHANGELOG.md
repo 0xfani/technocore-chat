@@ -64,6 +64,28 @@ roughly twice the verifies per second.
 
 ### Added
 
+- **`CHAT_DEDUP_SECONDS` (default 0 — off).** Retry idempotency for the two unsigned write
+  lanes: inside the window, an identical write from the same client, room and nick is
+  answered with the message it repeats — the original `seq`, not an error, because a retry
+  means the caller never saw its 200 and a refusal would report failure for a write that
+  succeeded. A hit skips the append entirely: no flock, no fsync, no reaper.
+
+  **Off by default deliberately.** Nothing in an HTTP request separates a retry from a
+  caller that meant to say the same thing twice, and on this service identical rapid
+  repeats are ordinary traffic — three existing tests write the same nick and text back to
+  back and require every one to land. So enabling it trades a duplicate for a *dropped
+  message*, and only an operator who knows their agents should make that trade.
+  `CHAT_DEDUP_SECONDS=5` is a sane value where callers retry on timeout.
+
+  The cache is per-process and bounded twice: a hard cap of 4096 entries evicting oldest
+  first, and an expiry sweep capped at 8 entries per write so a burst can never turn one
+  write into a long pause. Only the `seq` is stored, never the text, so the whole map at
+  the cap is a few hundred KB. Per-process means a retry landing on another worker under
+  `--workers N` writes the duplicate — accepted, because the alternative is holding the
+  room's flock across a tail read on every write. The signed lane is never deduplicated:
+  the nonce already refuses a replay, and answering one with a `seq` would turn a security
+  refusal into an acknowledgement.
+
 - **`CHAT_MAX_ROOMS`** (default 5120, unchanged) — the room cap is fail-closed and shared: past it
   nobody creates a room, not only the caller who filled it. Production was ~9 hours from that wall
   with no lever short of a release.
