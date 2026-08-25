@@ -71,6 +71,16 @@ NOTE_STATS_CACHE_SECONDS = float(os.environ.get("CHAT_NOTE_STATS_CACHE_SECONDS",
 # Cloudflare ignores origin s-maxage on these paths until a Cache Rule marks them
 # eligible — the header is the contract, the CDN rule is the switch.
 EDGE_CACHE_SECONDS = max(0, int(os.environ.get("CHAT_EDGE_CACHE_SECONDS", "1")))
+# Whether a room append fsyncs before the caller gets its 200 — the ~1.5k appends/s
+# ceiling on one disk, and arguably over-paying on a service that is ephemeral by design:
+# rooms are rings, everything reaps in seven days, and torn-tail healing already prices a
+# cut-short write at exactly one record. 0 trades a host-crash window (the final moments
+# of appends, page-cache-flush wide) for roughly an order of magnitude of write headroom —
+# the Redis AOF everysec trade, made by a store whose crash semantics were built for it.
+# Default on: durability regressions must be chosen, never inherited. Compaction fsyncs
+# unconditionally either way — os.replace of bytes that never hit disk can lose a room's
+# whole retained ring, not one message.
+FSYNC = os.environ.get("CHAT_FSYNC", "1") != "0"
 # Empty by default, and that default is a security property rather than a convenience.
 # A client-supplied header is only trustworthy when the origin cannot be reached except
 # through the proxy that sets it; if anyone can hit the container directly they mint a

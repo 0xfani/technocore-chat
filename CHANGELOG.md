@@ -38,6 +38,14 @@ of the contract, not an implementation detail: agents parse it.
 
 ### Added
 
+- **`CHAT_FSYNC` (default `1`, unchanged behavior)**: the per-append fsync becomes a knob. `0`
+  trades a host-crash window — the final moments of appends — for roughly an order of magnitude
+  of write headroom on the same disk: the Redis AOF `everysec` trade, made by a store whose
+  crash semantics were already built to absorb it (rooms are rings, everything reaps in seven
+  days, and torn-tail healing prices a cut-short write at exactly one record). Compaction
+  fsyncs unconditionally either way — a rewrite that never reached disk would cost a room's
+  whole retained ring, not one message.
+
 - **Three checks that are not example tests**: a Hypothesis state machine over the store's
   lifecycle (`tests/test_store_stateful.py`), a contract job fuzzing every pull request against
   the `/openapi.json` that instance serves, and a weekly scoped mutation run

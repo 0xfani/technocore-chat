@@ -941,3 +941,32 @@ def test_corrupt_aggregate_metadata_is_ignored_without_inventing_usage(tmp_path)
         "\n".join((json.dumps({"t": "yesterday"}), json.dumps([1, 2]), json.dumps({"t": 7})))
     )
     assert store.snapshots(tmp_path) == [{"t": 7}]
+
+
+def test_fsync_is_a_knob_but_compaction_never_skips_it(tmp_path, monkeypatch):
+    """CHAT_FSYNC=0 trades the per-message fsync for write headroom: a host crash can lose
+    the final moments of appends, and torn-tail healing already prices a cut-short write at
+    one record. Compaction is not part of the trade — os.replace of a file whose bytes never
+    reached disk can lose the room's whole retained ring, so it pays the fsync either way."""
+    import config
+    import store
+
+    real = os.fsync
+    calls = []
+
+    def counted(fd):
+        calls.append(fd)
+        real(fd)
+
+    monkeypatch.setattr(store.os, "fsync", counted)
+
+    store.append(tmp_path, "lobby", "bot", "durable")
+    # Two, not one: creating the room also appends its announcement to /r/events, and
+    # both records are on disk before the caller's 200.
+    assert len(calls) == 2
+
+    with config.override(FSYNC=False):
+        store.append(tmp_path, "lobby", "bot", "fast")
+        assert len(calls) == 2  # the append skipped it
+        store._compact(store.room_path(tmp_path, "lobby"))
+        assert len(calls) == 3  # the rewrite did not

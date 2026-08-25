@@ -1215,7 +1215,8 @@ def _write_record(
         with path.open("ab") as f:
             f.write(line)
             f.flush()
-            os.fsync(f.fileno())
+            if config.FSYNC:  # see the knob: the one durability trade an operator may make
+                os.fsync(f.fileno())
         limit = _ring_limit(root)
         if path.stat().st_size > limit:
             _compact(path, cutoff=_cutoff(room), keep=limit // 2)
