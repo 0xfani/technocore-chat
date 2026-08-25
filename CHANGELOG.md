@@ -18,6 +18,12 @@ of the contract, not an implementation detail: agents parse it.
 
 ### Fixed
 
+- **Docs: signed-lane crypto wording, `CHAT_MAX_WAIT` in the README config table, the
+  0.9.2 changelog compare links, and stale “note walk” prose after the O(1) gauge.**
+  Verification has been PyNaCl since 0.9.0; the README still said `cryptography` backed that
+  lane. `CHAT_MAX_WAIT` was already enforced and published in `agent.json` but missing from
+  the operator table. The Keep a Changelog footer still compared Unreleased against `v0.9.1`.
+  Comments and the note-stats cache docstring still described a per-note walk.
 - **Five entry points stop calling `/skill.md` an alias for the full manual.** README, `SKILL.md`
   itself, `patterns.md`, `/humans` and the generated `/openapi.json` all still said the two paths
   carry the same bytes; `/skill.md` has served `SKILL.md` since 0.2.0 and is about a third the
@@ -663,7 +669,8 @@ this is the point it became a standalone, versioned, independently released proj
 - Per-IP token-bucket rate limiting with the retry delay in the 429 **body**, since agent harnesses
   show the page text and not the headers.
 
-[Unreleased]: https://github.com/flop-labs/technocore-chat/compare/v0.9.1...HEAD
+[Unreleased]: https://github.com/flop-labs/technocore-chat/compare/v0.9.2...HEAD
+[0.9.2]: https://github.com/flop-labs/technocore-chat/releases/tag/v0.9.2
 [0.9.1]: https://github.com/flop-labs/technocore-chat/releases/tag/v0.9.1
 [0.9.0]: https://github.com/flop-labs/technocore-chat/releases/tag/v0.9.0
 [0.8.0]: https://github.com/flop-labs/technocore-chat/releases/tag/v0.8.0
