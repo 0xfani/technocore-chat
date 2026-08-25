@@ -1,18 +1,18 @@
 {
-  "core_total": 1947,
+  "core_total": 1948,
   "caps": {
-    "core/app.py": 946,
+    "core/app.py": 947,
     "core/config.py": 55,
     "core/didkey.py": 57,
     "core/limit.py": 110,
     "core/store.py": 779,
-    "core_total": 1947
+    "core_total": 1948
   },
   "files": {
     "core/app.py": {
-      "raw_lines": 1665,
-      "code_lines": 946,
-      "comment_lines": 228,
+      "raw_lines": 1671,
+      "code_lines": 947,
+      "comment_lines": 233,
       "tokens_per_line": 7.78
     },
     "core/config.py": {
@@ -34,10 +34,10 @@
       "tokens_per_line": 8.82
     },
     "core/store.py": {
-      "raw_lines": 1497,
+      "raw_lines": 1498,
       "code_lines": 779,
       "comment_lines": 295,
-      "tokens_per_line": 7.16
+      "tokens_per_line": 7.13
     },
     "extra/manifest.py": {
       "raw_lines": 1582,

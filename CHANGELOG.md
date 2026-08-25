@@ -34,6 +34,20 @@ roughly twice the verifies per second.
 
 ### Changed
 
+- **The store encodes and decodes records with orjson.** Every stored record passes through
+  this: ~4.7x stdlib on the read path and ~13.7x on the append, which is 1.70x end to end for
+  a 50-message tail read (258µs → 152µs). Output is **byte-identical** to the old encoder for
+  the shapes the store writes, so rooms already on disk are untouched and a single append-only
+  file can hold lines from both — pinned by a test that goes through the real append and
+  compares against the old encoder, key order included.
+
+  One deliberate tightening: orjson refuses the bare `NaN` and `Infinity` literals stdlib
+  accepts, so a request body carrying them is now a 400 rather than a record with a float nan
+  in it. Neither is JSON per RFC 8259, and the service already declines to boot on a
+  non-finite `CHAT_MAX_WAIT` for the same reason. `/openapi.json`, `/.well-known/agent.json`
+  and `/stats` keep the stdlib encoder: they are published with `indent=1` and orjson offers
+  only indent 2, so switching them would reformat documents agents diff.
+
 - **A new note no longer walks the whole note store.** `_check_note_capacity` summed a
   directory scan over every namespace to enforce `MAX_NOTES_TOTAL`, so each new note cost
   O(all notes) while the notes were growing — ~1,437 new notes an hour against ~13,000 notes

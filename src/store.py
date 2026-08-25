@@ -11,7 +11,6 @@ Design constraints (see docs/design.md):
 from __future__ import annotations
 
 import fcntl
-import json
 import os
 import re
 import time
@@ -21,6 +20,8 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
+
+import orjson
 
 import config
 import didkey
@@ -377,7 +378,7 @@ def counters(root: Path) -> dict:
     """The lifetime counters, with every key present. Read without the lock: the file is
     replaced atomically, so a reader either sees the old bytes or the new ones."""
     try:
-        data = json.loads((root / COUNTERS_FILE).read_text(encoding="utf-8"))
+        data = orjson.loads((root / COUNTERS_FILE).read_bytes())
     except (OSError, ValueError):
         data = {}
     if not isinstance(data, dict):
@@ -404,7 +405,7 @@ def _bump(root: Path, **deltas: int) -> None:
             for key, delta in deltas.items():
                 current[key] = current.get(key, 0) + delta
             tmp = path.parent / f"{path.name}.tmp"
-            tmp.write_text(json.dumps(current), encoding="utf-8")
+            tmp.write_bytes(orjson.dumps(current))
             os.replace(tmp, path)  # atomic: readers never see a half-written file
     except OSError:
         pass
@@ -460,7 +461,7 @@ def _expired(rec: dict, cutoff: float) -> bool:
 
 def _parse(line: bytes) -> dict | None:
     try:
-        rec = json.loads(line)
+        rec = orjson.loads(line)
     except (ValueError, UnicodeDecodeError):
         return None  # torn write at EOF, or hand-edited garbage
     return rec if isinstance(rec, dict) and isinstance(rec.get("seq"), int) else None
@@ -916,7 +917,7 @@ def snapshots(root: Path) -> list[dict]:
         return out
     for line in lines:
         try:
-            rec = json.loads(line)
+            rec = orjson.loads(line)
         except ValueError:
             continue
         if isinstance(rec, dict) and isinstance(rec.get("t"), (int, float)):
@@ -964,7 +965,7 @@ def _snapshot(root: Path) -> None:
             kept = [r for r in snapshots(root) if now - r["t"] <= SNAPSHOT_KEEP_SECONDS]
             kept.append({"t": int(now), **service_stats(root)})
             tmp = marker.parent / f"{marker.name}.tmp"
-            tmp.write_text("".join(json.dumps(r) + "\n" for r in kept), encoding="utf-8")
+            tmp.write_bytes(b"".join(orjson.dumps(r) + b"\n" for r in kept))
             os.replace(tmp, marker)
     except OSError:
         pass
@@ -1327,7 +1328,7 @@ def _write_record(
                     f"used in /r/{room} — a signed URL is single-use, so count up"
                 )
         rec["seq"] = last_seq(root, room) + 1
-        line = json.dumps(rec, ensure_ascii=False, separators=(",", ":")).encode() + b"\n"
+        line = orjson.dumps(rec) + b"\n"
         # Heal a torn tail before appending. A write cut short by a crash leaves a record
         # with no trailing newline; appending straight onto it would fuse the two into one
         # unparseable line, so the *next* message would be lost too — the torn record must
