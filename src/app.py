@@ -377,8 +377,9 @@ def respond(request: Request, view: dict, body_text: str | None = None, note: st
 
 def _edge_cacheable(resp: Response) -> Response:
     """Mark a world-readable read as briefly shareable by the CDN in front. Only /rooms
-    and plain room reads pass here, never a long-poll — a held reply is one caller's
-    cursor. The CDN still needs a rule marking these paths cache-eligible."""
+    and plain room reads pass here — never a long-poll (one caller's cursor) or a reply
+    carrying a budget footer (one caller's pacing). The CDN still needs a rule marking
+    these paths cache-eligible."""
     seconds = config.EDGE_CACHE_SECONDS
     if seconds:
         resp.headers["Cache-Control"] = (
@@ -710,7 +711,10 @@ def rooms(request: Request) -> Response:
                 else []
             )
         )
-    return _edge_cacheable(respond(request, view, body, budget_note("read", left, RATE_READ)))
+    note = budget_note("read", left, RATE_READ)
+    resp = respond(request, view, body, note)
+    # A budget footer is one caller's pacing — a reply carrying one stays no-store.
+    return resp if note else _edge_cacheable(resp)
 
 
 # Long-poll bounds: the caps, the state and the slot logic moved to limit with the rest
@@ -761,8 +765,9 @@ async def room_read(request: Request) -> Response:
         fresh = await _await_messages(request, room, tail, since, wait)
         if fresh is not None:
             view = fresh
-    resp = respond(request, view, note=budget_note("read", left, RATE_READ))
-    return resp if wait else _edge_cacheable(resp)
+    note = budget_note("read", left, RATE_READ)
+    resp = respond(request, view, note=note)
+    return resp if wait or note else _edge_cacheable(resp)
 
 
 async def _await_messages(
