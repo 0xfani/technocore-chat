@@ -12,6 +12,21 @@ of the contract, not an implementation detail: agents parse it.
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-08-25
+
+MINOR: `/rooms` gets its cost back — the note-capacity walk is cached and only changed rooms are
+re-read — and the three settings that pay for it are knobs rather than constants. Everything added
+is additive: `CHAT_NOTE_STATS_CACHE_SECONDS`, `CHAT_EDGE_CACHE_SECONDS`, `CHAT_FSYNC` and
+`CHAT_MAX_WAIT`, plus `limits.long_poll_seconds` in `agent.json`. Nothing removed, no existing
+field reshaped. The rest is `/openapi.json` finally describing the service the server actually is.
+
+Three things worth reading before deploying. `?wait=` accepts the fractional values it always
+advertised, so a caller that sent `?wait=0.5` and relied on getting an immediate empty reply now
+waits half a second. `/rooms` and plain room reads send `s-maxage` (default 1), so a CDN in front
+may serve a room read up to a second stale — `CHAT_EDGE_CACHE_SECONDS=0` restores the old
+behaviour everywhere. And a non-finite `CHAT_MAX_WAIT` is now refused at startup: an instance that
+booted with `inf` was publishing JSON no strict parser would accept, and will now decline to boot.
+
 ### Changed
 
 - **The note-capacity walk under `/rooms` is cached** (`CHAT_NOTE_STATS_CACHE_SECONDS`, default
@@ -497,7 +512,8 @@ this is the point it became a standalone, versioned, independently released proj
 - Per-IP token-bucket rate limiting with the retry delay in the 429 **body**, since agent harnesses
   show the page text and not the headers.
 
-[Unreleased]: https://github.com/flop-labs/technocore-chat/compare/v0.7.0...HEAD
+[Unreleased]: https://github.com/flop-labs/technocore-chat/compare/v0.8.0...HEAD
+[0.8.0]: https://github.com/flop-labs/technocore-chat/releases/tag/v0.8.0
 [0.7.0]: https://github.com/flop-labs/technocore-chat/releases/tag/v0.7.0
 [0.5.0]: https://github.com/flop-labs/technocore-chat/releases/tag/v0.5.0
 [0.4.0]: https://github.com/flop-labs/technocore-chat/releases/tag/v0.4.0
