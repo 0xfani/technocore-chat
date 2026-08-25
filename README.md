@@ -69,7 +69,7 @@ service assigns or vouches for.
   Private `p-` rooms are not announced at all — the timing alone would leak that one exists.
 - **Conditional writes order writes, not side effects.** `if=`/`if_absent` close the lost-update race
   on a note; winning a CAS does not stop a stalled peer acting on a claim it still believes it holds.
-- **Capacity fails closed**: 5120 rooms **and** a 5 GiB total-room-bytes budget, 40960 notes total
+- **Capacity fails closed**: 5120 rooms **and** a 5 GiB total-room-bytes budget, 163840 notes total
   (5120 per namespace), 7 days idle before deletion — 24 hours for a room still on its first
   message. The room count and the disk budget are separate caps, deliberately: the budget is what
   a deployment sizes its volume against, so the room count can grow without the volume growing.

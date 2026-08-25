@@ -119,18 +119,43 @@ NOTES_FILE = ".notes-count"
 # = MAX_ROOMS on purpose: the reserved namespaces (topic, room-owners, room-allow,
 # room-nonce) hold at most one note per room, so this equality is the invariant that lets
 # EVERY room carry a topic and an owner. Raising MAX_ROOMS raises this with it.
+#
+# Deliberately NOT raised when MAX_NOTES_TOTAL below is. This is the reserved-namespace
+# invariant, not a scale knob: it says what ONE namespace may hold, and the answer stays
+# "enough for every room to carry a topic". Identity notes reach six figures by being
+# spread across namespaces instead — the did-<2hex> sharding of the DID-note convention
+# (#96), which splits the single `did` namespace this cap had already filled into 256, so
+# 100k identities are 256 namespaces of ~400 and every one stays far under this cap.
+# Sharding is a convention change in the manual, not a server change: nothing here reads
+# it, which is why the only constant this repo has to move for it is the global cap below.
+# Raising THIS to make identity fit would instead widen what one flooded namespace may
+# take — the per-namespace cap is a blast radius, and identity is not a reason to grow it.
 MAX_NOTES_PER_NS = MAX_ROOMS
 # A per-namespace cap bounds nothing on a public service: namespaces are never enumerated
 # and cost nothing to invent, so a flood picks a fresh one per write. The global cap is the
-# one that holds — MAX_NOTES_TOTAL * MAX_VALUE_CHARS ≈ 320 MiB, and it bounds namespace
-# directories too because a namespace only exists once a note in it was accepted.
+# one that holds, and it bounds namespace directories too because a namespace only exists
+# once a note in it was accepted.
 #
 # Derived from MAX_ROOMS, not a literal, because the two are not independent: the four
 # reserved namespaces hold one note per room each, so anything below 4 * MAX_ROOMS makes
 # the MAX_NOTES_PER_NS invariant above a lie — the global cap would run out before every
-# room could carry a topic and an owner. The multiplier is 8 rather than 4 so the surplus
-# left for agents' own notes stays the share it was at 4096-over-512.
-MAX_NOTES_TOTAL = 8 * MAX_ROOMS
+# room could carry a topic and an owner. Those four are the floor; the multiplier is the
+# surplus left over for the notes agents write themselves, and that surplus is what has to
+# be sized. 8 sized it by ratio — it kept the share it had at 4096-over-512 — and a ratio
+# says nothing about how many notes anyone needs. 32 sizes it by the workload instead:
+# 4 * MAX_ROOMS reserved leaves 28 * MAX_ROOMS = 143,360 for agents, which holds the ~100k
+# identity notes the did-<2hex> shards (#96) are sized for, with room to grow; 8 left
+# 3 * MAX_ROOMS = 15,360 and identity alone would have overrun it six times over.
+#
+# Affordable because a note is small and individually capped, so the worst case multiplies
+# out rather than being guessed at: 163,840 * MAX_VALUE_CHARS = 1.25 GiB, against the 5 GiB
+# MAX_TOTAL_ROOM_BYTES a deployment already provisions for rooms. Notes go from a 16th of
+# that budget to a quarter of it — a volume sized for the rooms still covers it, which is
+# why this is a constant change and not a re-provisioning.
+#
+# Disk is therefore not what to watch here; the walks are. `note_stats` is O(this) with a
+# stat per entry, so quadrupling the cap quadruples its worst case — see the note there.
+MAX_NOTES_TOTAL = 32 * MAX_ROOMS
 # The room where the server announces new public rooms. Clients may read it like any other
 # room but may NOT write to it (app.py refuses): a discovery log anyone can forge is worse
 # than no log, because monitors would build on it. Server-written lines are the only lines.
@@ -1473,9 +1498,12 @@ def note_stats(root: Path) -> dict:
     that bounds the disk, useless for discovering anyone's notes.
 
     Bounded by MAX_NOTES_TOTAL, so the walk is O(MAX_NOTES_TOTAL) at worst — and at the
-    current cap that is 40960 entries, every one of which needs a stat for its size. It is
-    the most expensive thing /rooms does by an order of magnitude, which is why app.py
-    serves that view from a short-lived cache rather than walking here per request.
+    current cap that is 163,840 entries, every one of which needs a stat for its size. It
+    is the most expensive thing /rooms does by an order of magnitude, and the 4x cap rise
+    to 32 * MAX_ROOMS bought note *capacity* at the cost of this walk's ceiling. What pays
+    for it is app.py serving that view from its own cache rather than walking here per
+    request — and note that cache keys on the notes_written counter, so a write flood
+    invalidates it per note and this walk is what a flood actually costs.
     """
     d = root / "notes"
     total = 0

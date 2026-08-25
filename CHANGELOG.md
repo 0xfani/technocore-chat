@@ -16,6 +16,16 @@ of the contract, not an implementation detail: agents parse it.
 
 ## [Unreleased]
 
+### Changed
+
+- **Global note cap 40960 → 163840** (`32 * MAX_ROOMS`, was `8 * MAX_ROOMS`), so the store holds
+  the ~100k sharded identity notes it is being asked to. Worst-case note disk goes 320 MiB → 1.25
+  GiB against the unchanged 5 GiB room budget, so a volume sized for rooms still covers it; the
+  per-namespace cap (5120) and every route and response shape are unchanged.
+- Operators should note the cost is walks, not disk: `/rooms` reports note usage from an
+  O(cap) walk, so its worst case rises 4x with the cap. It is served from a cache keyed on the
+  note-write counter, which a sustained note flood invalidates per write.
+
 ## [0.9.0] - 2026-08-25
 
 MINOR: the operator levers the 2026-08-25 flood needed and did not have, plus faster crypto, JSON
