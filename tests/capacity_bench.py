@@ -200,13 +200,13 @@ def store_bench(root: Path) -> None:
 
     def room_gate() -> None:
         try:
-            store._check_room_capacity(fresh_room)
+            store._check_room_capacity(root, fresh_room)
         except store.StoreError:
             pass  # at the cap the refusal is the answer; the walk is what we are timing
 
     def note_gate() -> None:
         try:
-            store._check_note_capacity(root, fresh_note)
+            store._check_note_capacity(root, root / "notes" / "ns0", fresh_note)
         except store.StoreError:
             pass
 
@@ -224,7 +224,7 @@ def store_bench(root: Path) -> None:
     bench("glob  rooms/*.jsonl", lambda: _drain(root.glob("rooms/*.jsonl")))
     bench("_walk rooms .jsonl", lambda: _drain(store._walk(root / "rooms", ".jsonl")))
     bench("glob  notes/*/*.txt", lambda: _drain(root.glob("notes/*/*.txt")))
-    bench("_walk notes .txt", lambda: _drain(store._walk(root / "notes", ".txt", True)))
+    bench("_walk notes .txt", lambda: _drain(store._walk(root / "notes", ".txt")))
     bench("_scan notes .txt (count only)", lambda: _scan_notes(root))
 
 
