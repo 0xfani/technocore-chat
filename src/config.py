@@ -185,6 +185,27 @@ def _finite_env(name: str, default: str) -> float:
 # exists to prevent.
 MAX_WAIT = max(0.0, _finite_env("CHAT_MAX_WAIT", "10"))
 
+# How often a ?wait= long-poll re-reads the room. This is the wake latency: a write lands
+# at an arbitrary phase against a fixed-interval tick, so the wait for the next read is
+# near enough uniform over [0, WAIT_POLL] — median ~0.5x it, p90 ~0.9x, worst case the
+# whole interval — plus ~10 ms for the read and the round trip. That additive term is why
+# the p90 stops tracking the interval once it is small: over 60 independent phases on four
+# workers, 0.5 measured 462 ms (0.92x) and 0.05 measured 56 ms (1.13x, mostly overhead).
+#
+# It is also what makes long-polling work across processes at all — the poll re-reads the
+# room *file*, so a write from any worker is seen by a waiter parked on every other one,
+# with no shared memory, no lifespan hook and no wakeup bus.
+#
+# Lowering it buys latency with reads: at 0.5 a waiter costs two tail reads a second, at
+# 0.05 it costs twenty, times MAX_WAITERS_TOTAL per process. On a cached small room those
+# reads are cheap and 0.05 is a reasonable trade for a ~55 ms p90; on a busy instance with
+# the waiter cap raised, measure before dropping it far.
+#
+# Floored, not clamped to zero like the knobs above it: 0 would spin the wait loop with no
+# sleep at all, burning a core and issuing unbounded reads per waiter, which is a way to
+# take an instance down by configuration. 0.01 is already 100 reads a second per waiter.
+WAIT_POLL = max(0.01, _finite_env("CHAT_WAIT_POLL", "0.5"))
+
 # How long an identical unsigned write is answered with the message it repeats instead of
 # writing a second one. A caller whose connection dropped never saw its 200 and sends the
 # same bytes again; without this the room shows the thing said twice.
