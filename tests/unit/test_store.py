@@ -264,7 +264,7 @@ def test_rejected_write_leaves_no_lock_file(tmp_path, monkeypatch):
     for i in range(5):
         with pytest.raises(store.StoreError, match="room limit"):
             store.append(tmp_path, f"flood{i}", "bot", "hi")
-    assert list((tmp_path / "rooms").glob("*.lock")) == [
+    assert list((tmp_path / "rooms").rglob("*.lock")) == [
         store.room_path(tmp_path, "only").with_suffix(".jsonl.lock")
     ]
 
@@ -298,8 +298,8 @@ def test_note_cap_holds_under_concurrent_creates(tmp_path, monkeypatch):
     monkeypatch.setattr(store, "MAX_NOTES_TOTAL", 4)
     real_check = store._check_note_capacity
 
-    def slow_check(root, path):
-        real_check(root, path)
+    def slow_check(root, ns_dir, path):
+        real_check(root, ns_dir, path)
         time.sleep(0.02)  # widen the count→write window every racer must lose
 
     monkeypatch.setattr(store, "_check_note_capacity", slow_check)
@@ -315,7 +315,7 @@ def test_note_cap_holds_under_concurrent_creates(tmp_path, monkeypatch):
     threads = [threading.Thread(target=create, args=(i,)) for i in range(8)]
     [t.start() for t in threads]
     [t.join() for t in threads]
-    assert sum(1 for _ in (tmp_path / "notes").glob("*/*.txt")) == 4
+    assert sum(1 for _ in (tmp_path / "notes").rglob("*.txt")) == 4
 
 
 def test_orphan_locks_are_swept(tmp_path):
