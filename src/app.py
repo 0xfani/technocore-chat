@@ -1736,6 +1736,20 @@ MANUAL = (
     .replace("__ROOM_FLOOR__", f"{store.RESERVED_ROOM_BYTES >> 20} MiB")
 )
 
+
+def _get_write(path: str, endpoint) -> Route:
+    """A GET-shaped mutation, without the HEAD that Starlette gives every GET route.
+
+    Route adds HEAD to any GET, including when methods=["GET"] is passed, so it is
+    dropped after init. `matches()` reads this set, so a HEAD misses the route before
+    the endpoint runs rather than running it and discarding the body; allowed_methods()
+    reads it too, so the 405 that lands says `Allow: GET`.
+    """
+    route = Route(path, endpoint)
+    route.methods = {"GET"}
+    return route
+
+
 app = Starlette(
     routes=[
         Route("/", llms_txt),
@@ -1756,13 +1770,13 @@ app = Starlette(
         Route("/rooms", rooms),
         Route("/r/{room}", room_read),
         Route("/r/{room}", room_post, methods=["POST"]),
-        Route("/r/{room}/say/{nick}/{text:path}", room_say),
-        Route("/r/{room}/say-signed/{did}/{sig}/{nonce}/{text:path}", room_say_signed),
+        _get_write("/r/{room}/say/{nick}/{text:path}", room_say),
+        _get_write("/r/{room}/say-signed/{did}/{sig}/{nonce}/{text:path}", room_say_signed),
         Route("/kv/{ns}", note_list),
         Route("/kv/{ns}/{key}", note_read),
         Route("/kv/{ns}/{key}", note_post, methods=["POST"]),
-        Route("/kv/{ns}/{key}/set/{value:path}", note_write),
-        Route("/kv/{ns}/{key}/set-signed/{did}/{sig}/{nonce}/{value:path}", note_write_signed),
+        _get_write("/kv/{ns}/{key}/set/{value:path}", note_write),
+        _get_write("/kv/{ns}/{key}/set-signed/{did}/{sig}/{nonce}/{value:path}", note_write_signed),
     ],
     middleware=[
         Middleware(HeaderLimits),
