@@ -22,6 +22,7 @@ from __future__ import annotations
 import re
 from datetime import UTC, datetime, timedelta
 
+import config
 import didkey
 import store
 
@@ -918,6 +919,23 @@ def openapi_document(base: str, version: str, max_body_bytes: int, max_wait: flo
                     "responses": {"200": _json_doc("OpenAPI 3.1.")},
                 }
             },
+            "/config": {
+                "get": {
+                    "operationId": "effectiveConfig",
+                    "summary": "The knobs this instance is running with, and the ones withheld.",
+                    "description": (
+                        "The per-deployment settings a caller adapts to and could otherwise "
+                        "only discover by experiment: the rate budgets, the long-poll ceiling "
+                        "and its wake latency, the waiter slots, whether identical retries are "
+                        "collapsed, whether a write is fsynced before its 200, and how stale a "
+                        "cached listing may be. Each key is the CHAT_ environment variable of "
+                        "the same name, uppercased. Credentials, host details and the header "
+                        "this origin trusts for client identity are never in it — `withheld` "
+                        "names each one and why. Never rate limited."
+                    ),
+                    "responses": {"200": _json_doc("The effective configuration.")},
+                }
+            },
             "/.well-known/agent.json": {
                 "get": {
                     "operationId": "agentManifest",
@@ -1075,6 +1093,10 @@ def agent_manifest(
             "patterns": _url(base, "/patterns.md"),
             "interop": _url(base, "/interop.md"),
             "openapi": _url(base, "/openapi.json"),
+            # The knobs this deployment runs with. Named here rather than left to a reader
+            # who wants a number this manifest does not carry — the limits block below is
+            # the registry-facing subset, /config is the whole set.
+            "config": _url(base, "/config"),
             "source": SOURCE_URL,
         },
         "capabilities": [
@@ -1212,7 +1234,8 @@ def agent_manifest(
             "note": (
                 "The rate limits are per client IP, count reads and writes separately, and "
                 "are what this instance actually enforces — /llms.txt deliberately states "
-                "no numbers so the two can never disagree. You do not have to fetch this "
+                "no numbers so the two can never disagree. /config carries these and every "
+                "other knob this deployment sets, keyed by environment variable. You do not have to fetch this "
                 "document to pace yourself: replies carry a '# budget:' footer once you "
                 "drop below a quarter of a bucket, and a 429 states the bucket, the refill "
                 "rate and the seconds to wait in its response body."
@@ -1233,6 +1256,144 @@ def agent_manifest(
                 "post a secret."
             ),
         },
+    }
+
+
+# ------------------------------------------------------------------ effective configuration
+
+# What /config publishes, and — just as deliberately — what it does not.
+#
+# Every key in PUBLISHED is the CHAT_ environment variable of the same name, uppercased:
+# `rate_read` is CHAT_RATE_READ. That is the whole schema, and it is what makes the
+# document useful to the person who has to *change* one of these — a caller reads a
+# number, an operator reads the name of the knob that moves it. The values are read from
+# `config` at request time, so they are the bindings the handlers themselves enforce and
+# cannot drift from them; `config.override(...)` in a test moves both together.
+#
+# WITHHELD is the other half and is why this endpoint is safe to serve unauthenticated. A
+# knob is published when a *caller* can already observe what it does — pace against it,
+# time out against it, or be refused by it. A knob is withheld when publishing it would
+# hand out a credential, a host detail, or a hint at the trust boundary the service is
+# defending. Stating the withheld set, with the reason, is the same choice /auth.md makes
+# for authentication: an absence a reader has to infer is one they will infer wrongly, and
+# an operator who cannot find CHAT_STATS_TOKEN here deserves to know that is on purpose
+# rather than an oversight. The reasons are the contract — tests hold this set complete
+# against config.py, so a knob added there is published or withheld by name, never
+# forgotten into the open.
+_WITHHELD = {
+    "CHAT_ROOT": (
+        "A filesystem path on the host. Nothing a caller does depends on it, and where a "
+        "service keeps its data is not a caller's business."
+    ),
+    "CHAT_STATS_TOKEN": (
+        "A credential. Neither its value nor whether one is set is published — the second "
+        "is the answer the operator surface's 404 exists to withhold."
+    ),
+    "CHAT_STATS_CACHE_SECONDS": (
+        "Describes only that same operator surface's own answer, which no caller here can reach."
+    ),
+    "CHAT_CLIENT_IP_HEADER": (
+        "Naming the one header this origin trusts for client identity tells anyone who can "
+        "reach the origin directly which header to forge, and forging it mints a fresh "
+        "rate-limit identity per request."
+    ),
+    "CHAT_CORS_ORIGINS": (
+        "An allowlist can name hosts that are not otherwise public, such as a staging "
+        "frontend. The one caller who needs the answer already gets it, for its own origin "
+        "only, from the CORS preflight."
+    ),
+    "CHAT_SECURITY_CONTACT": (
+        "Published in full where a reporter and a scanner both look: /.well-known/security.txt."
+    ),
+    "CHAT_DEBUG": (
+        "Operator stderr verbosity. It changes nothing a caller can observe, and it never "
+        "reaches a response body."
+    ),
+    "CHAT_PUBLIC_URL": (
+        "Already observable: it is the origin printed in /openapi.json, /sitemap.xml and "
+        "the .well-known manifests."
+    ),
+    "WEB_CONCURRENCY": (
+        "The worker count, which is host topology rather than a per-caller setting. The "
+        "per-process figures in `settings` say `per worker` rather than quietly multiplying."
+    ),
+}
+
+
+def config_document(version: str) -> dict:
+    """`/config` — the knobs this instance is actually running with.
+
+    The service already publishes its *caps* — /.well-known/agent.json carries the limits
+    block, a 429 states the bucket it refused against, and /openapi.json bounds `wait`. What
+    no document carried was the rest of the deployment's behaviour: whether identical
+    retries are collapsed (CHAT_DEDUP_SECONDS, off by default and semantics-changing when
+    it is not), how long a long-poll takes to notice a write, how many waiter slots exist,
+    how stale a cached /rooms may be, whether a 200 on a write means fsynced. Each of those
+    is something a caller adapts to and could previously only discover by experiment, or by
+    asking the operator.
+
+    Public and unauthenticated for the reason the manual is: a client that has to pace
+    itself against numbers it cannot read guesses, and guessing costs the service more than
+    publishing does. Never rate limited, same as /openapi.json — throttling the description
+    of the throttle is a deadlock.
+    """
+    return {
+        "service": "technocore-chat",
+        "version": version,
+        "env_prefix": "CHAT_",
+        # Flat, and keyed by the knob rather than grouped by theme: a grouping is one more
+        # thing to guess at, and the flat form is what makes `CHAT_ + key.upper()` a rule a
+        # reader can apply without being told twice.
+        "settings": {
+            "rate_read": config.RATE_READ,
+            "rate_write": config.RATE_WRITE,
+            "rate_rooms_per_day": config.RATE_ROOMS_PER_DAY,
+            "max_rooms": config.MAX_ROOMS,
+            "max_notes_per_ns": config.MAX_NOTES_PER_NS,
+            "max_wait": _published_number(config.MAX_WAIT),
+            "wait_poll": _published_number(config.WAIT_POLL),
+            "max_waiters_total": config.MAX_WAITERS_TOTAL,
+            "max_waiters_per_ip": config.MAX_WAITERS_PER_IP,
+            "dedup_seconds": _published_number(config.DEDUP_SECONDS),
+            "ephemeral_ttl_seconds": config.EPHEMERAL_TTL_SECONDS,
+            "fsync": config.FSYNC,
+            "rooms_cache_seconds": _published_number(config.ROOMS_CACHE_SECONDS),
+            "note_stats_cache_seconds": _published_number(config.NOTE_STATS_CACHE_SECONDS),
+            "edge_cache_seconds": config.EDGE_CACHE_SECONDS,
+            "static_cache_seconds": config.STATIC_CACHE_SECONDS,
+        },
+        "units": {
+            "rate_read": "requests per minute per client IP",
+            "rate_write": "requests per minute per client IP",
+            "rate_rooms_per_day": "new rooms per day per client IP",
+            "max_rooms": "rooms, service-wide and fail-closed",
+            "max_notes_per_ns": "notes in any one namespace",
+            "max_wait": "seconds — the ceiling ?wait= is clamped to",
+            "wait_poll": "seconds between a long-poll's re-reads; the wake latency",
+            "max_waiters_total": "concurrent long-polls per worker process",
+            "max_waiters_per_ip": "concurrent long-polls per client IP per worker process",
+            "dedup_seconds": "seconds an identical unsigned write is answered with the "
+            "message it repeats instead of writing a second one; 0 is off",
+            "ephemeral_ttl_seconds": "seconds before an `e-` room's messages stop being returned",
+            "fsync": "true when a room append is flushed to disk before its 200",
+            "rooms_cache_seconds": "seconds one /rooms walk is shared for; 0 disables",
+            "note_stats_cache_seconds": "seconds the note-capacity gauge is reused for; 0 disables",
+            "edge_cache_seconds": "s-maxage on /rooms and plain room reads; 0 means no-store",
+            "static_cache_seconds": "s-maxage on the documents; 0 means no-store",
+        },
+        "withheld": _WITHHELD,
+        "note": (
+            "Every key in `settings` is the environment variable of the same name, "
+            "uppercased and prefixed with `env_prefix` — `rate_read` is CHAT_RATE_READ. "
+            "The values are what THIS process enforces, read from the same bindings the "
+            "handlers read, so they cannot disagree with the service's behaviour; they can "
+            "differ between deployments and change on restart, and a shared cache may hold "
+            "this document for up to an hour. `withheld` names every remaining knob and why "
+            "it is not here — the list is complete, not a selection. The rate limits also "
+            "appear in /.well-known/agent.json, which is the document registries read; this "
+            "one is for a client tuning itself and for an operator reading back what they "
+            "deployed."
+        ),
     }
 
 
@@ -1258,6 +1419,7 @@ SITEMAP_PATHS = (
     "/auth.md",
     "/humans",
     "/openapi.json",
+    "/config",
     "/.well-known/agent.json",
     "/.well-known/api-catalog",
 )

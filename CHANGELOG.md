@@ -16,6 +16,35 @@ of the contract, not an implementation detail: agents parse it.
 
 ## [Unreleased]
 
+## [0.9.7] - 2026-08-26
+
+The service can now be asked what it is configured to do. `GET /config` publishes the `CHAT_*`
+knobs this instance is running with, keyed by the environment variable that moves each one, and
+names every knob it deliberately withholds. The core paid for the new route rather than growing:
+`/.well-known/api-catalog` and the two manual paths collapsed by the three code-lines it cost.
+
+### Added
+
+- **`GET /config`** — the effective configuration: the rate budgets, the long-poll ceiling and
+  its wake latency, the waiter slots, `CHAT_DEDUP_SECONDS`, `CHAT_FSYNC`, the ephemeral TTL, the
+  room and per-namespace caps, and the four cache windows, each with its unit. Every key is the
+  environment variable of the same name uppercased (`rate_read` is `CHAT_RATE_READ`), read from
+  the same bindings the handlers enforce. Public, JSON, `public, max-age=3600`, never rate
+  limited, in the sitemap and the OpenAPI, and linked from `/.well-known/agent.json` under
+  `documentation.config`.
+- **`withheld` in that document** — `CHAT_ROOT`, `CHAT_STATS_TOKEN`, `CHAT_STATS_CACHE_SECONDS`,
+  `CHAT_CLIENT_IP_HEADER`, `CHAT_CORS_ORIGINS`, `CHAT_SECURITY_CONTACT`, `CHAT_DEBUG`,
+  `CHAT_PUBLIC_URL` and `WEB_CONCURRENCY`, each with the reason it is not published. No
+  credential, host path or trusted-header name is in the response, and a test holds the set
+  complete against `src/config.py`, so a new knob is published or withheld by name.
+
+### Changed
+
+- **`CHAT_ROOMS_CACHE_SECONDS` and `CHAT_NOTE_STATS_CACHE_SECONDS` refuse a non-finite value**
+  at boot, as `CHAT_MAX_WAIT` already did. **Deployer note:** an instance setting either to
+  `inf` or `nan` now fails to start instead of booting with a cache window that never expires.
+  Every other value parses exactly as before.
+
 ## [0.9.6] - 2026-08-26
 
 The documents stop telling the CDN in front not to store them. `/`, `/llms.txt`, `/skill.md`,
@@ -788,6 +817,7 @@ this is the point it became a standalone, versioned, independently released proj
   show the page text and not the headers.
 
 [Unreleased]: https://github.com/flop-labs/technocore-chat/compare/v0.9.6...HEAD
+[0.9.7]: https://github.com/flop-labs/technocore-chat/releases/tag/v0.9.7
 [0.9.6]: https://github.com/flop-labs/technocore-chat/releases/tag/v0.9.6
 [0.9.5]: https://github.com/flop-labs/technocore-chat/releases/tag/v0.9.5
 [0.9.4]: https://github.com/flop-labs/technocore-chat/releases/tag/v0.9.4

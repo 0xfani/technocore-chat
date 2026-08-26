@@ -490,13 +490,19 @@ def _base_url(request: Request) -> str:
     )
 
 
-def _document(doc: dict) -> Response:
+def _document(doc: dict, media_type: str = "application/json") -> Response:
     """JSON with a short cache. The other JSON on this service is no-store because it is
-    room content that changes per second; these two describe the *shape* of the service,
-    which changes per release, and registries and crawlers refetch them on a schedule."""
+    room content that changes per second; these describe the *shape* of the service — or,
+    for /config, the settings of the process serving it — which changes per release or per
+    deploy, and registries and crawlers refetch them on a schedule.
+
+    `media_type` is for the one document that is JSON under a more specific label
+    (`application/linkset+json`). Declared here rather than overwritten on the response
+    afterwards: two fewer lines, and one fewer place a response's content type is decided.
+    """
     return Response(
         json.dumps(doc, ensure_ascii=False, indent=1) + "\n",
-        media_type="application/json",
+        media_type=media_type,
         headers={"Cache-Control": "public, max-age=3600"},
     )
 
@@ -525,9 +531,7 @@ def agent_json(request: Request) -> Response:
 def api_catalog(request: Request) -> Response:
     """`/.well-known/api-catalog` — RFC 9727. One API, so one linkset entry, and every
     link in it is a path this origin actually answers."""
-    response = _document(manifest.api_catalog_document(_base_url(request)))
-    response.headers["Content-Type"] = "application/linkset+json"
-    return response
+    return _document(manifest.api_catalog_document(_base_url(request)), "application/linkset+json")
 
 
 def ai_catalog(request: Request) -> Response:
@@ -537,6 +541,22 @@ def ai_catalog(request: Request) -> Response:
     card, because it publishes neither. A catalog exists to resolve to real things.
     """
     return _document(manifest.ai_catalog_document(_base_url(request)))
+
+
+def config_json(request: Request) -> Response:
+    """`/config` — the CHAT_* knobs this process is running with, and the withheld ones.
+
+    The caps were already published (agent.json's limits block, the 429 body, the `wait`
+    bound in the spec); the rest of the deployment's observable behaviour was not — dedup,
+    wake latency, waiter slots, fsync, how stale a cached listing may be. A caller that
+    cannot read those adapts by experiment, which costs the service more requests than
+    answering does.
+
+    Unlimited and unauthenticated, like the manual and the spec: the built document holds
+    no credential and no host detail (manifest._WITHHELD is the enumerated reason for each
+    one it leaves out), and rate-limiting the description of the rate limit is a deadlock.
+    """
+    return _document(manifest.config_document(VERSION))
 
 
 def agent_skills(request: Request) -> Response:
@@ -1803,11 +1823,12 @@ def _get_write(path: str, endpoint) -> Route:
 
 app = Starlette(
     routes=[
-        Route("/", llms_txt),
-        Route("/llms.txt", llms_txt),
+        # Two paths, one handler — see llms_txt: the bytes were always the same.
+        *[Route(path, llms_txt) for path in ("/", "/llms.txt")],
         *[Route(path, doc_md) for path in _DOCS],
         Route("/auth.md", auth_md),
         Route("/openapi.json", openapi),
+        Route("/config", config_json),
         Route("/sitemap.xml", sitemap),
         Route("/.well-known/agent.json", agent_json),
         Route("/.well-known/api-catalog", api_catalog),

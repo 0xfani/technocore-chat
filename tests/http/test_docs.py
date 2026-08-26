@@ -368,8 +368,8 @@ def test_every_documented_response_declares_the_body_it_returns(client):
 
 
 def test_a_published_ceiling_is_a_number_json_can_carry(client, monkeypatch):
-    """`float()` accepts `inf` and `nan` where the `int()` beside it raises, and this is the
-    one setting whose value is published. A non-finite ceiling reaches /openapi.json and
+    """`float()` accepts `inf` and `nan` where the `int()` beside it raises, and this setting's
+    value is published. A non-finite ceiling reaches /openapi.json and
     /.well-known/agent.json as the bare token `Infinity` — which Python emits and reads back
     but RFC 8259 forbids, so every strict parser rejects the whole document. A discovery
     service answering with undiscoverable documents is worse off than one that refused to
