@@ -464,41 +464,55 @@ def _shard(name: str, key: bytes | None = None) -> str:
 
 
 def _migrate(legacy: Path, sharded: Path) -> None:
-    """Move a pre-sharding file to its bucket, sidecar lock and all. Best effort.
+    """Move a pre-sharding file into its bucket. The data only — deliberately NOT the lock.
 
-    The lock moves *with* the data and is not left to the orphan sweeper, because a rename
-    keeps the inode: a writer already holding the old lock and a writer opening the new path
-    end up on the same inode, so the lock domain survives the move instead of splitting in
-    two the way a fresh lock file beside a held one would. Only when nothing is there yet —
-    replacing an existing lock would orphan whoever holds it, and the sweeper reclaims the
-    stray after IDLE_SECONDS either way.
+    Moving the sidecar too looked tidier and was a lock-domain bug. Between testing that the
+    destination is free and replacing it, another worker that already sees the migrated data
+    can create and flock that very path, and the replace then unlinks the inode it is holding.
+    The next writer opens the inode that arrived instead, so two workers hold what both
+    believe is the room lock — and `seq` is assigned under it, as are the nonce check and CAS.
+    Reproduced before it was removed: a third opener took the lock while the second still held
+    it. There is no check-then-replace that closes this; not replacing is what closes it.
+
+    Nothing is lost by leaving the stray, because nothing can be holding it. `_locked` is only
+    ever called on a path `_resolve` handed out, and `_resolve` hands out the legacy path only
+    while the file is still there — so the lock a live writer holds is always the one beside
+    the file it is writing. `_sweep_orphan_locks` already exists for precisely this shape (a
+    lock whose data file is gone) and reclaims it once it has been idle as long as any reaped
+    room.
+
+    The reaper is the one caller that can hold a legacy lock, because it locks what its walk
+    found rather than what a resolver returned. It only ever unlinks, and it re-stats by path
+    under the lock, so a file migrated out from under it fails that stat and is skipped rather
+    than deleted.
     """
     try:
         sharded.parent.mkdir(parents=True, exist_ok=True)
         os.replace(legacy, sharded)
     except OSError:
-        return  # lost the race to another resolver, or unwritable: the data is still there
-    try:
-        if not (moved := Path(f"{sharded}.lock")).exists():
-            os.replace(Path(f"{legacy}.lock"), moved)
-    except OSError:
-        pass
+        return  # lost the race, or cannot write: `_resolve` falls back to what is on disk
 
 
 def _resolve(d: Path, name: str, suffix: str) -> Path:
-    """The bucketed path for `name`, moving a pre-sharding file there first if that is where
-    it still lives.
+    """Where `name` lives right now, moving a pre-sharding file into its bucket on the way.
 
-    This ALWAYS returns the sharded path, which is what makes the migration safe rather than
-    merely lazy. A resolver that handed back the legacy path to readers and the sharded one to
-    writers would fork a live room in two — the old file keeping the history, the new one
-    starting from `seq` 1 — and reads would then see only the new one, because they check the
-    bucket first. Since no caller can ever be given the legacy path, no caller can ever write
-    to it, so there is exactly one file per name at every instant.
+    The property that matters is that every caller gets the SAME answer, not that the answer
+    is always the bucket. A resolver handing the legacy path to readers and the bucket to
+    writers forks a live room in two — the old file keeps the history, the new one restarts at
+    `seq` 1, and reads see only the new one because they check the bucket first. So this
+    returns one path per name per instant, and it is the file that actually exists.
 
-    Concurrency needs nothing beyond that. Two resolvers racing the same unmigrated name both
-    reach `_migrate`; the first `os.replace` wins and the second fails ENOENT on a source that
-    is already gone, and both return the same sharded path regardless.
+    Which is why a migration that could not run falls back to the legacy path rather than
+    returning a bucket with nothing in it. A read-only volume, or a restore whose ownership
+    was never fixed, would otherwise turn every unmigrated room into an empty one and every
+    note into a missing one — silently, because an absent file is how this store spells "no
+    such room". Serving the data that is plainly there is strictly better than hiding it, and
+    it is not the fork above: readers and writers still agree, since the fallback is only
+    taken while the legacy file is the only copy in existence.
+
+    Two resolvers racing the same unmigrated name both reach `_migrate`; the first
+    `os.replace` wins, the second fails ENOENT on a source already gone, and both then see the
+    legacy file absent and return the same bucketed path.
 
     The cost in steady state is one `stat` — the bucket probe — since a name that resolved
     once is found there and the legacy probe never runs. That is the price of never needing a
@@ -506,8 +520,12 @@ def _resolve(d: Path, name: str, suffix: str) -> Path:
     """
     filename = f"{name}{suffix}"
     sharded = d / _shard(name) / filename
-    if not sharded.exists() and (legacy := d / filename).exists():
+    if sharded.exists():
+        return sharded
+    if (legacy := d / filename).exists():
         _migrate(legacy, sharded)
+        if legacy.exists():  # the move could not run; the data is still readable there
+            return legacy
     return sharded
 
 

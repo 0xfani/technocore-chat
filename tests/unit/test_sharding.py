@@ -1,6 +1,7 @@
 """Run: uv run --group dev python -m pytest tests
 
-Two-level directory sharding, and the lazy migration that gets a live store into it.
+One level of 256-way directory sharding, and the lazy migration that gets a live store
+into it.
 
 The migration is the half worth testing hardest. A store that is already sharded is just a
 store with deeper paths; a store part-way through the move is one where the same room can be
@@ -132,9 +133,9 @@ def test_an_append_to_a_flat_room_keeps_its_history_rather_than_forking_it(tmp_p
     Migrate on read but write straight to the bucket and a live room ends up in two files:
     the old one holding every message, the new one holding the next one at `seq` 1. Reads
     check the bucket first, so the room silently loses its whole history and its sequence
-    restarts — no error, no 500, nothing in a log. So the resolver returns the sharded path
-    to EVERY caller and moves the file to match, which means no caller can hold a path to
-    the old location long enough to write to it.
+    restarts — no error, no 500, nothing in a log. So the resolver returns ONE path per name
+    per instant, the same one to readers and writers, and moves the file to match it — which
+    means the two can never be looking at different files.
     """
     import store
 
@@ -148,21 +149,75 @@ def test_an_append_to_a_flat_room_keeps_its_history_rather_than_forking_it(tmp_p
     assert on_disk == ["live.jsonl"], f"the room exists in {len(on_disk)} places, not one"
 
 
-def test_the_sidecar_lock_travels_with_the_room_it_guards(tmp_path):
-    """A rename keeps the inode, so a writer already holding the old lock and one opening
-    the new path meet on the same inode. Leaving the lock behind and letting a fresh one be
-    created beside the moved data is what splits a lock domain in two."""
+def test_the_migration_never_replaces_a_sidecar_lock(tmp_path):
+    """Migration moves the data and leaves the lock where it is.
+
+    Moving the lock too is a lock-domain bug, and the shape of it is check-then-replace: a
+    worker that already sees the migrated data can create and flock the destination between
+    the "is it free?" test and the replace, and the replace then unlinks the inode it holds.
+    Two workers then hold what both believe is the room lock, which is what `seq`, the nonce
+    check and CAS are all serialised by.
+
+    Asserted on the inode rather than on existence, because that is the failure: a lock that
+    a live writer holds must never stop being the lock at its own path.
+    """
     import store
 
     legacy = _legacy_room(tmp_path, "old", _record(1, "one"))
     legacy_lock = legacy.with_suffix(".jsonl.lock")
-    inode = legacy_lock.stat().st_ino
 
     store.append(tmp_path, "old", "alice", "two")
+    fresh = store.room_path(tmp_path, "old").with_suffix(".jsonl.lock")
 
-    moved = store.room_path(tmp_path, "old").with_suffix(".jsonl.lock")
-    assert not legacy_lock.exists(), "the old sidecar is gone"
-    assert moved.stat().st_ino == inode, "…because it was renamed, not recreated"
+    assert legacy_lock.exists(), "the old sidecar is left for the orphan sweeper"
+    assert fresh.exists(), "…and the moved data got its own, freshly created"
+    assert fresh.stat().st_ino != legacy_lock.stat().st_ino, "no inode was replaced"
+
+
+def test_the_sweeper_reclaims_the_lock_the_migration_left(tmp_path, monkeypatch):
+    """Which is what makes leaving it free rather than a leak: the orphan sweep already
+    exists for a lock whose data file is gone, and a migrated-away file is exactly that."""
+    import store
+
+    legacy = _legacy_room(tmp_path, "old", _record(1, "one"))
+    legacy_lock = legacy.with_suffix(".jsonl.lock")
+    store.append(tmp_path, "old", "alice", "two")
+    assert legacy_lock.exists(), "premise: the migration left it"
+
+    old = time.time() - store.IDLE_SECONDS - 60
+    os.utime(legacy_lock, (old, old))
+    monkeypatch.setattr(store, "REAP_EVERY", 0)
+    store._reap(tmp_path)
+
+    assert not legacy_lock.exists(), "an idle lock with no data file must be swept"
+    assert store.read_messages(tmp_path, "old", limit=5)["messages"][-1]["text"] == "two"
+
+
+def test_a_migration_that_cannot_write_still_serves_the_data(tmp_path, monkeypatch):
+    """A read-only volume, or a restore whose ownership was never fixed, must not turn every
+    unmigrated room into an empty one.
+
+    An absent file is how this store spells "no such room", so a resolver that returned the
+    bucket after a failed move would report the whole store as gone — silently, with the data
+    plainly still on disk. Falling back is not the fork this design is shaped around: readers
+    and writers still agree, because the fallback is taken only while the legacy file is the
+    only copy that exists.
+    """
+    import store
+
+    _legacy_room(tmp_path, "stuck", _record(1, "one"), _record(2, "two"))
+    _legacy_note(tmp_path, "kv", "held", "value")
+
+    def refuse(*args, **kwargs):
+        raise PermissionError("read-only volume")
+
+    monkeypatch.setattr(store.os, "replace", refuse)
+
+    view = store.read_messages(tmp_path, "stuck", limit=50)
+    assert [m["text"] for m in view["messages"]] == ["one", "two"], "the history is served"
+    assert store.room_path(tmp_path, "stuck") == tmp_path / "rooms" / "stuck.jsonl"
+    assert store.note_get(tmp_path, "kv", "held") == "value"
+    assert store.list_rooms(tmp_path) == ["stuck"], "…and it still lists"
 
 
 def test_a_flat_note_moves_and_keeps_its_value(tmp_path):
