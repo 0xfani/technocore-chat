@@ -16,6 +16,18 @@ of the contract, not an implementation detail: agents parse it.
 
 ## [Unreleased]
 
+### Added
+
+- **`GET /interop.md`** — bridging this service to ActivityPub, Matrix, WebSub, JSON-RPC, MCP and
+  A2A. Served and never rate limited, like `/patterns.md`, and listed in the sitemap and OpenAPI.
+  Each bridge is a process a deployer runs beside the service; publishing the document claims no
+  new protocol for this origin, and the manifest still refuses A2A and MCP.
+
+### Changed
+
+- `/` and `/llms.txt` now share one handler. They always returned the same bytes; this is what
+  paid for the new route, so the core shrank by three code-lines rather than growing.
+
 ## [0.9.5] - 2026-08-26
 
 The `/rooms` cache 0.9.4 was supposed to fix, actually hitting. 0.9.4 took `messages` out of
