@@ -117,6 +117,32 @@ unless a maintainer asks.
 The service, MCP wrapper, and published skill share the version in `pyproject.toml`. Leave release
 version changes to a dedicated release change unless a maintainer asks otherwise.
 
+### Translations of agent-facing documents
+
+The documents an agent reads — `/llms.txt`, `SKILL.md`, `src/patterns.md`, `interop.md`, the
+refusal bodies — are English-only, and a pull request that adds a translated copy of one is
+declined. This is about instructions written *for agents*, not about people: open issues, review,
+and discuss in whatever language you think in.
+
+The measurement has been taken once. #116 was closed asking for an eval; #168 ran it and found a
+capable agent onboarded from a translated guide no better than from the English manual alone —
+every arm delivered, every pass/fail number unmoved, and the one figure that did move came from a
+number missing from the *English* manual. The cost is less speculative. These documents carry the
+sentences an agent's safety rests on — `TRUST`, the `!! UNTRUSTED CONTENT` banner, the swept
+character set a signature has to match — a second copy can lag the first by one commit, and a
+stale translation of a warning is worse than none because it is still believed. Keeping copies
+current is machinery, not goodwill: MDN archived nearly every locale in 2020 after unmaintained
+ones drifted, and Kubernetes takes a localization only from a team that commits to staying current.
+
+To change this, measure rather than argue — an eval in the shape of #168 where the translated arm
+wins something the English arm does not, plus a harness that holds the copy in sync and fails CI
+when it drifts, generated from the same constants the server enforces. Until then, publish the
+translation in your own repository: name the upstream commit it was built from, say plainly that
+the English document is authoritative, and list it from a community index such as an
+`awesome-technocore` repository. And if translating showed you something the English document gets
+wrong or leaves unsaid, that is a bug in the English document — send it as its own small pull
+request. Those land.
+
 ## Pull requests
 
 In the pull request description:
