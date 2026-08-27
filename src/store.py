@@ -1702,7 +1702,19 @@ def append(
     The announcement is a line in an ordinary room rather than a new endpoint, so every
     primitive that already exists does the rest — `?since=` for incremental reads,
     `?format=json`, `?wait=` for near-real-time, ring retention, the same rate limits.
+
+    `EVENTS_NICK` is reserved against the unsigned lane here, not in `_write_record`: the
+    server's own event lines go through `_write_record` directly with that exact nick, and
+    must keep working. Only a caller arriving through `append` without a DID can be forging
+    it — `who()` renders every non-DID name as `~<name>`, so an unsigned write of `server`
+    is byte-identical to a genuine `~server` announcement.
     """
+    if did is None and nick == EVENTS_NICK:
+        raise StoreError(
+            f"the nickname {EVENTS_NICK!r} is reserved for the server's own room-created "
+            "announcements — an unsigned write cannot claim it. Sign the write, or pick a "
+            "different nickname."
+        )
     rec, created = _write_record(root, room, nick, text, did=did, nonce=nonce)
     # Counted here rather than in `_write_record`, so the server's own announcements
     # (`_log_event` writes one per created room) never inflate the message count. This

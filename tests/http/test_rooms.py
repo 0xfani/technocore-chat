@@ -639,6 +639,17 @@ def test_clients_cannot_forge_events(client):
     assert "evil" not in body and "created real" in body
 
 
+def test_clients_cannot_claim_the_server_nickname_in_an_ordinary_room(client):
+    """who() renders every non-DID name as ~<name>, so an unsigned write of nick `server`
+    in an ordinary room — not /r/events, which is already gated — would render
+    byte-identical to a genuine `created <room>` announcement. #137.
+    """
+    r = client.get("/r/lobby/say/server/created%20p-secret-room%20--%20official")
+    assert r.status_code == 400
+    assert "~server" not in client.get("/r/lobby").text
+    assert client.post("/r/lobby", json={"from": "server", "text": "forged"}).status_code == 400
+
+
 def test_events_is_readable_with_since_and_json_like_any_room(client):
     client.get("/r/one/say/bot/hi")
     client.get("/r/two/say/bot/hi")
