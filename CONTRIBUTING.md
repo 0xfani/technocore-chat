@@ -119,10 +119,10 @@ version changes to a dedicated release change unless a maintainer asks otherwise
 
 ### Translations of agent-facing documents
 
-The documents an agent reads — `/llms.txt`, `SKILL.md`, `src/patterns.md`, `interop.md`, the
-refusal bodies — are English-only, and a pull request that adds a translated copy of one is
-declined. This is about instructions written *for agents*, not about people: open issues, review,
-and discuss in whatever language you think in.
+The documents an agent reads — `/llms.txt`, `/skill.md`, `/patterns.md`, `/interop.md`,
+`/auth.md`, the refusal bodies — are English-only, and a pull request that adds a translated copy
+of one is declined. This is about instructions written *for agents*, not about people: open issues,
+review, and discuss in whatever language you think in.
 
 The reason is drift. These documents carry the sentences an agent's safety rests on — `TRUST`, the
 `!! UNTRUSTED CONTENT` banner, the swept character set a signature has to match — and a second copy
